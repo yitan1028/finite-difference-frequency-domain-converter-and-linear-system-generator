@@ -5,6 +5,26 @@ frequency-domain sparse linear systems. It is a linear-system converter for
 downstream classical or quantum solvers. It is not a full wave simulator and
 it is not a quantum solver.
 
+## Repository layout
+
+```text
+README.md
+examples/
+  demo_3x3_layered.py
+  output/                         generated and ignored
+frequency_domain_converter/
+  src/fd_converter/               converter package code
+  configs/                        formal and demo JSON configurations
+  tests/                          unit tests and report script
+  outputs/                        formal generated output packages
+```
+
+This root README is the main GitHub entry point. Commands below are written
+for the repository root unless a command explicitly changes directory. The
+formal converter package, its configurations, tests, and formal output remain
+inside `frequency_domain_converter/`. The root-level teaching example writes
+its generated figures and package to `examples/output/demo_3x3/`.
+
 ## 1. Goal
 
 Given one 2D velocity map and a set of selected frequencies, the converter
@@ -117,11 +137,13 @@ to select a velocity input, grid, frequency set, source, or output path.
 
 The repository includes two configurations:
 
-- `configs/first_layered_run.json`: formal file-based conversion. It expects
-  the velocity dataset at `../model2.npy` relative to the project root and
-  selects `model_index: 0`.
-- `configs/demo_3x3.json`: a small inline `3 x 3` layered map for the teaching
-  demo. It uses the same core converter, then the demo script creates figures.
+- `frequency_domain_converter/configs/first_layered_run.json`: formal
+  file-based conversion. It expects
+  the velocity dataset at `../model2.npy` relative to the
+  `frequency_domain_converter/` directory and selects `model_index: 0`.
+- `frequency_domain_converter/configs/demo_3x3.json`: a small inline `3 x 3`
+  layered map for the teaching demo. It uses the same core converter, then
+  the root-level demo script creates figures.
 
 The formal configuration has this structure:
 
@@ -269,10 +291,11 @@ apply a time-delay or other complex source phase.
 
 ## 9. Output directory structure
 
-With `configs/first_layered_run.json`, the formal output package is:
+With `frequency_domain_converter/configs/first_layered_run.json`, the formal
+output package is:
 
 ```text
-outputs/first_layered_run/
+frequency_domain_converter/outputs/first_layered_run/
 |-- manifest.json
 |-- config_input.json
 |-- config_resolved.json
@@ -335,8 +358,8 @@ install the package plus the test runner:
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-python -m pip install -e .
+python -m pip install -r frequency_domain_converter/requirements.txt
+python -m pip install -e frequency_domain_converter
 python -m pip install pytest
 ```
 
@@ -344,24 +367,24 @@ If your system exposes Python as `python3`, replace `python` with `python3` in
 the commands below.
 
 Run the formal converter after ensuring that the file referenced by
-`configs/first_layered_run.json` is available (the reference configuration
+`frequency_domain_converter/configs/first_layered_run.json` is available (the
+reference configuration
 uses `../model2.npy`):
 
 ```bash
-python -m fd_converter.cli --config configs/first_layered_run.json
+python -m fd_converter.cli --config frequency_domain_converter/configs/first_layered_run.json
 ```
 
 For a source checkout without an editable install, this equivalent command is
 supported:
 
 ```bash
-PYTHONPATH=src python -m fd_converter.cli --config configs/first_layered_run.json
+PYTHONPATH=frequency_domain_converter/src python -m fd_converter.cli --config frequency_domain_converter/configs/first_layered_run.json
 ```
 
 Run the 3x3 teaching example:
 
 ```bash
-cd ..
 python examples/demo_3x3_layered.py --config frequency_domain_converter/configs/demo_3x3.json
 ```
 
@@ -376,7 +399,7 @@ but is not the formal production workflow.
 ```python
 import numpy as np
 
-v = np.load("outputs/first_layered_run/velocity_selected.npy")
+v = np.load("frequency_domain_converter/outputs/first_layered_run/velocity_selected.npy")
 print(v.shape, v.dtype, v.min(), v.max())
 print(v[:5, :5])
 ```
@@ -396,8 +419,8 @@ Inspect the source vector and transformed RHS at 10 Hz:
 ```python
 import numpy as np
 
-B = np.load("outputs/first_layered_run/systems/frequency_010Hz/source_B.npy")
-Q = np.load("outputs/first_layered_run/systems/frequency_010Hz/rhs_Q.npy")
+B = np.load("frequency_domain_converter/outputs/first_layered_run/systems/frequency_010Hz/source_B.npy")
+Q = np.load("frequency_domain_converter/outputs/first_layered_run/systems/frequency_010Hz/rhs_Q.npy")
 print(B.shape, Q.shape)
 print(np.nonzero(B[:, 0])[0])
 print(np.nonzero(Q[:, 0])[0])
@@ -413,7 +436,7 @@ Load a SciPy sparse matrix without converting the full matrix to dense form:
 ```python
 from scipy.sparse import load_npz
 
-A = load_npz("outputs/first_layered_run/systems/frequency_010Hz/A_csr.npz")
+A = load_npz("frequency_domain_converter/outputs/first_layered_run/systems/frequency_010Hz/A_csr.npz")
 print(A.shape)
 print(A.nnz)
 print(A.dtype)
@@ -431,7 +454,7 @@ Read the cross-language Matrix Market representation with:
 ```python
 from scipy.io import mmread
 
-A = mmread("outputs/first_layered_run/systems/frequency_010Hz/A.mtx").tocsr()
+A = mmread("frequency_domain_converter/outputs/first_layered_run/systems/frequency_010Hz/A.mtx").tocsr()
 ```
 
 ## 13. How to verify correctness
@@ -444,7 +467,7 @@ index `1` is correct here because the reference frequency order is `[5, 10,
 from scipy.sparse import diags, load_npz
 import numpy as np
 
-root = "outputs/first_layered_run"
+root = "frequency_domain_converter/outputs/first_layered_run"
 K = load_npz(f"{root}/operators/K_csr.npz")
 M_diag = np.load(f"{root}/operators/M_diag.npy")
 omegas = np.load(f"{root}/omega_rad_s.npy")
@@ -478,15 +501,15 @@ assembly, and export/readback behavior.
 Run all tests and generate human-readable and machine-readable reports:
 
 ```bash
-python tests/run_tests_with_report.py
+python frequency_domain_converter/tests/run_tests_with_report.py
 ```
 
 The script writes:
 
 ```text
-tests/test_results/pytest_output.txt
-tests/test_results/test_report.txt
-tests/test_results/test_report.json
+frequency_domain_converter/tests/test_results/pytest_output.txt
+frequency_domain_converter/tests/test_results/test_report.txt
+frequency_domain_converter/tests/test_results/test_report.json
 ```
 
 The report checks:
@@ -508,7 +531,8 @@ final status `PASS`.
 
 ## 15. Current validated example
 
-The checked `outputs/first_layered_run/` reference package has:
+The checked `frequency_domain_converter/outputs/first_layered_run/` reference
+package has:
 
 ```text
 velocity_selected shape: (70, 70)
@@ -531,8 +555,8 @@ every `A_j`, and every `Q_j` in this package.
 For each frequency, a downstream solver can use:
 
 ```text
-systems/frequency_xxxHz/A_csr.npz
-systems/frequency_xxxHz/rhs_Q.npy
+frequency_domain_converter/outputs/<run_name>/systems/frequency_xxxHz/A_csr.npz
+frequency_domain_converter/outputs/<run_name>/systems/frequency_xxxHz/rhs_Q.npy
 ```
 
 or the corresponding `A.mtx` file, to solve:
@@ -544,8 +568,8 @@ A_j U_j = Q_j
 The shared structured components are also exported:
 
 ```text
-operators/K_csr.npz
-operators/M_diag.npy
+frequency_domain_converter/outputs/<run_name>/operators/K_csr.npz
+frequency_domain_converter/outputs/<run_name>/operators/M_diag.npy
 ```
 
 They preserve the relationship:

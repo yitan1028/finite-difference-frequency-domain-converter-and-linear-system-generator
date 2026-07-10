@@ -30,6 +30,6 @@
     "phase_mode": "zero"
   },
   "output": {
-    "directory": "outputs/demo_3x3"
+    "directory": "../examples/output/demo_3x3"
   }
 }

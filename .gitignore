@@ -11,3 +11,5 @@ frequency_domain_converter/outputs/
 frequency_domain_converter/build/
 frequency_domain_converter/dist/
 frequency_domain_converter/*.egg-info/
+
+examples/output/
