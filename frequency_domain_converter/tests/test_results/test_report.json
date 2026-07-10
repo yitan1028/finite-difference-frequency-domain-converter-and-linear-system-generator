@@ -1,0 +1,167 @@
+{
+  "K_construction_error": 0.0,
+  "K_dtype": "float64",
+  "K_is_csr": true,
+  "K_nnz": 24220,
+  "K_shape": [
+    4900,
+    4900
+  ],
+  "K_symmetry_error": 0.0,
+  "M_diag_formula_error": 0.0,
+  "M_diag_max": 4.0829241903050965e-07,
+  "M_diag_min": 5.704191251493286e-08,
+  "M_diag_shape": [
+    4900
+  ],
+  "all_formula_checks_passed": true,
+  "all_frequency_systems_exist": true,
+  "failed": 0,
+  "frequency_checks": [
+    {
+      "A_is_csr": true,
+      "A_nnz": 24220,
+      "A_shape": [
+        4900,
+        4900
+      ],
+      "directory": "frequency_005Hz",
+      "frequency_hz": 5.0,
+      "max_A_error": 0.0,
+      "max_Q_error": 0.0,
+      "omega_rad_s": 31.41592653589793,
+      "rhs_Q_nonzero_indices": [
+        525
+      ],
+      "rhs_Q_shape": [
+        4900,
+        1
+      ],
+      "source_B_nonzero_indices": [
+        525
+      ],
+      "source_B_shape": [
+        4900,
+        1
+      ],
+      "status": "PASS"
+    },
+    {
+      "A_is_csr": true,
+      "A_nnz": 24220,
+      "A_shape": [
+        4900,
+        4900
+      ],
+      "directory": "frequency_010Hz",
+      "frequency_hz": 10.0,
+      "max_A_error": 0.0,
+      "max_Q_error": 0.0,
+      "omega_rad_s": 62.83185307179586,
+      "rhs_Q_nonzero_indices": [
+        525
+      ],
+      "rhs_Q_shape": [
+        4900,
+        1
+      ],
+      "source_B_nonzero_indices": [
+        525
+      ],
+      "source_B_shape": [
+        4900,
+        1
+      ],
+      "status": "PASS"
+    },
+    {
+      "A_is_csr": true,
+      "A_nnz": 24220,
+      "A_shape": [
+        4900,
+        4900
+      ],
+      "directory": "frequency_015Hz",
+      "frequency_hz": 15.0,
+      "max_A_error": 0.0,
+      "max_Q_error": 0.0,
+      "omega_rad_s": 94.24777960769379,
+      "rhs_Q_nonzero_indices": [
+        525
+      ],
+      "rhs_Q_shape": [
+        4900,
+        1
+      ],
+      "source_B_nonzero_indices": [
+        525
+      ],
+      "source_B_shape": [
+        4900,
+        1
+      ],
+      "status": "PASS"
+    },
+    {
+      "A_is_csr": true,
+      "A_nnz": 24220,
+      "A_shape": [
+        4900,
+        4900
+      ],
+      "directory": "frequency_020Hz",
+      "frequency_hz": 20.0,
+      "max_A_error": 0.0,
+      "max_Q_error": 0.0,
+      "omega_rad_s": 125.66370614359172,
+      "rhs_Q_nonzero_indices": [
+        525
+      ],
+      "rhs_Q_shape": [
+        4900,
+        1
+      ],
+      "source_B_nonzero_indices": [
+        525
+      ],
+      "source_B_shape": [
+        4900,
+        1
+      ],
+      "status": "PASS"
+    }
+  ],
+  "max_A_errors": {
+    "frequency_005Hz": 0.0,
+    "frequency_010Hz": 0.0,
+    "frequency_015Hz": 0.0,
+    "frequency_020Hz": 0.0
+  },
+  "max_Q_errors": {
+    "frequency_005Hz": 0.0,
+    "frequency_010Hz": 0.0,
+    "frequency_015Hz": 0.0,
+    "frequency_020Hz": 0.0
+  },
+  "numpy_version": "1.24.3",
+  "omega_array_error": 0.0,
+  "operator_files_exist": true,
+  "output_package_checked": true,
+  "output_package_exists": true,
+  "overall_status": "PASS",
+  "passed": 23,
+  "project_root": "/Users/tansheng/research/quantum coding/frequency domain fft transformer/frequency_domain_converter",
+  "pytest_errors": 0,
+  "pytest_status": "PASS",
+  "pytest_version": "7.4.0",
+  "python_version": "3.11.5",
+  "scipy_version": "1.11.1",
+  "skipped": 0,
+  "timestamp": "2026-07-10T17:11:47-04:00",
+  "total_tests": 23,
+  "validation_errors": [],
+  "velocity_shape": [
+    70,
+    70
+  ]
+}

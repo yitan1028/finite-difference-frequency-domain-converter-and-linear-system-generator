@@ -1,0 +1,127 @@
+==================================================
+Test Report
+==================================================
+
+1. Run information
+- timestamp: 2026-07-10T17:11:47-04:00
+- project root: /Users/tansheng/research/quantum coding/frequency domain fft transformer/frequency_domain_converter
+- Python version: 3.11.5
+- NumPy version: 1.24.3
+- SciPy version: 1.11.1
+- pytest version: 7.4.0
+
+2. Pytest summary
+- total tests collected: 23
+- passed: 23
+- failed: 0
+- skipped: 0
+- collection/runtime errors: 0
+- final status: PASS
+
+3. Input/output specification summary
+- output package: /Users/tansheng/research/quantum coding/frequency domain fft transformer/frequency_domain_converter/outputs/first_layered_run
+- velocity_selected shape: [70, 70]
+- nx: 70
+- nz: 70
+- N: 4900
+- dx: 10.0 m
+- dz: 10.0 m
+- boundary type: zero_exterior_ghost
+- flatten order: C
+- index formula: p = iz * nx + ix
+- frequencies_hz: [5.0, 10.0, 15.0, 20.0]
+- omega_rad_s: [31.41592653589793, 62.83185307179586, 94.24777960769379, 125.66370614359172]
+- source type: point_ricker_spectrum
+- source ix: 35
+- source iz: 7
+- source flat index: 525
+- equation form: A_j U_j = Q_j
+- operator definition: A_j = K - omega_j^2 M
+- RHS definition: Q_j = M B_j
+
+4. Operator checks
+- K shape: [4900, 4900]
+- K nnz: 24220
+- K dtype: float64
+- K is sparse CSR: YES
+- M_diag shape: [4900]
+- M_diag min/max: 5.7041912514932862e-08 / 4.0829241903050965e-07
+- K symmetry error: 0.0000000000000000e+00
+- K 5-point construction error: 0.0000000000000000e+00
+- M_diag formula error: 0.0000000000000000e+00
+- expected matrix dimension: 4900 x 4900
+- K.shape == (N, N): YES
+- M_diag.shape == (N,): YES
+
+5. Per-frequency system checks
+
+[frequency_005Hz]
+- frequency_hz: 5.0
+- omega_rad_s: 31.41592653589793
+- A shape: [4900, 4900]
+- A nnz: 24220
+- A is sparse CSR: YES
+- source_B shape: [4900, 1]
+- rhs_Q shape: [4900, 1]
+- source_B nonzero indices: [525]
+- rhs_Q nonzero indices: [525]
+- max error of A - (K - omega^2 * diag(M_diag)): 0.0000000000000000e+00
+- max error of rhs_Q - M_diag[:, None] * source_B: 0.0000000000000000e+00
+- status: PASS
+
+[frequency_010Hz]
+- frequency_hz: 10.0
+- omega_rad_s: 62.83185307179586
+- A shape: [4900, 4900]
+- A nnz: 24220
+- A is sparse CSR: YES
+- source_B shape: [4900, 1]
+- rhs_Q shape: [4900, 1]
+- source_B nonzero indices: [525]
+- rhs_Q nonzero indices: [525]
+- max error of A - (K - omega^2 * diag(M_diag)): 0.0000000000000000e+00
+- max error of rhs_Q - M_diag[:, None] * source_B: 0.0000000000000000e+00
+- status: PASS
+
+[frequency_015Hz]
+- frequency_hz: 15.0
+- omega_rad_s: 94.24777960769379
+- A shape: [4900, 4900]
+- A nnz: 24220
+- A is sparse CSR: YES
+- source_B shape: [4900, 1]
+- rhs_Q shape: [4900, 1]
+- source_B nonzero indices: [525]
+- rhs_Q nonzero indices: [525]
+- max error of A - (K - omega^2 * diag(M_diag)): 0.0000000000000000e+00
+- max error of rhs_Q - M_diag[:, None] * source_B: 0.0000000000000000e+00
+- status: PASS
+
+[frequency_020Hz]
+- frequency_hz: 20.0
+- omega_rad_s: 125.66370614359172
+- A shape: [4900, 4900]
+- A nnz: 24220
+- A is sparse CSR: YES
+- source_B shape: [4900, 1]
+- rhs_Q shape: [4900, 1]
+- source_B nonzero indices: [525]
+- rhs_Q nonzero indices: [525]
+- max error of A - (K - omega^2 * diag(M_diag)): 0.0000000000000000e+00
+- max error of rhs_Q - M_diag[:, None] * source_B: 0.0000000000000000e+00
+- status: PASS
+
+6. Expected success criteria
+- A formula check passes if max_A_error <= 1e-10
+- RHS formula check passes if max_Q_error <= 1e-12
+- source_B and rhs_Q should have the same nonzero flat index for a point source
+- A_j should be sparse CSR
+- K should be sparse CSR
+
+7. Final conclusion
+- Unit tests: PASS
+- Output package exists: YES
+- Operator files exist: YES
+- All frequency systems exist: YES
+- All formula checks passed: YES
+- Overall status: PASS
