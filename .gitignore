@@ -8,6 +8,9 @@ __pycache__/
 htmlcov/
 
 frequency_domain_converter/outputs/
+**/solved_outputs/
+*.npz
+*.mtx
 frequency_domain_converter/build/
 frequency_domain_converter/dist/
 frequency_domain_converter/*.egg-info/

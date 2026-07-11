@@ -492,11 +492,37 @@ Both values should be zero or near floating-point precision. The packaged
 test report also reconstructs the 5-point `K`, checks `M_diag = 1 / v^2`,
 checks sparse CSR format, and validates all exported frequencies.
 
+## Solving generated systems
+
+The converter generates `A_j U_j = Q_j`; the embedded classical solver can
+solve each exported frequency system as a validation and reference baseline:
+
+```bash
+python -m fd_converter.solve_cli --input frequency_domain_converter/outputs/first_layered_run
+```
+
+For a source checkout without an editable install, use:
+
+```bash
+PYTHONPATH=frequency_domain_converter/src python -m fd_converter.solve_cli --input frequency_domain_converter/outputs/first_layered_run
+```
+
+The solver uses SciPy's sparse direct `spsolve`. Every invocation creates a
+new timestamped folder under
+`frequency_domain_converter/outputs/first_layered_run/solved_outputs/solve_<timestamp>_<id>/`,
+without overwriting earlier solves. Each frequency folder contains `U.npy`
+with shape `(N, 1)`, `U_grid.npy` with shape `(nz, nx)`, the residual vector,
+a preview, and text/JSON residual reports. The acceptance test requires a
+finite solution and relative residual at most `1e-9`.
+
+This is not the quantum solver. It is a classical reference result that the
+quantum team can use for interface validation and solution comparison.
+
 ## 14. Testing and reports
 
 The `tests/` directory contains unit tests for configuration validation,
 velocity loading, flattening, sparse operators, source construction, system
-assembly, and export/readback behavior.
+assembly, export/readback behavior, and the classical sparse solver.
 
 Run all tests and generate human-readable and machine-readable reports:
 
@@ -526,7 +552,7 @@ The report checks:
 - the source nonzero index;
 - sparse CSR format.
 
-The current reference report records 23 collected tests, 23 passed tests, and
+The current reference report records 29 collected tests, 29 passed tests, and
 final status `PASS`.
 
 ## 15. Current validated example

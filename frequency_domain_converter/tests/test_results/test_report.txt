@@ -3,7 +3,7 @@ Test Report
 ==================================================
 
 1. Run information
-- timestamp: 2026-07-10T17:11:47-04:00
+- timestamp: 2026-07-11T02:03:33-04:00
 - project root: /Users/tansheng/research/quantum coding/frequency domain fft transformer/frequency_domain_converter
 - Python version: 3.11.5
 - NumPy version: 1.24.3
@@ -11,8 +11,8 @@ Test Report
 - pytest version: 7.4.0
 
 2. Pytest summary
-- total tests collected: 23
-- passed: 23
+- total tests collected: 29
+- passed: 29
 - failed: 0
 - skipped: 0
 - collection/runtime errors: 0
@@ -111,14 +111,27 @@ Test Report
 - max error of rhs_Q - M_diag[:, None] * source_B: 0.0000000000000000e+00
 - status: PASS
 
-6. Expected success criteria
+6. Latest classical solve summary
+- latest solve folder: /Users/tansheng/research/quantum coding/frequency domain fft transformer/frequency_domain_converter/outputs/first_layered_run/solved_outputs/solve_20260711_015621_f4b613da
+- frequency systems found: 4
+- solved successfully: 4
+- failed: 0
+- all solves completed: YES
+- all residual tests passed: YES
+- solve status: PASS
+- frequency_005Hz: frequency=5.0 Hz, relative_residual=3.1885197469824032e-14, status=PASS
+- frequency_010Hz: frequency=10.0 Hz, relative_residual=4.8988785456815947e-15, status=PASS
+- frequency_015Hz: frequency=15.0 Hz, relative_residual=2.5601617477040511e-14, status=PASS
+- frequency_020Hz: frequency=20.0 Hz, relative_residual=6.9163031014053105e-14, status=PASS
+
+7. Expected success criteria
 - A formula check passes if max_A_error <= 1e-10
 - RHS formula check passes if max_Q_error <= 1e-12
 - source_B and rhs_Q should have the same nonzero flat index for a point source
 - A_j should be sparse CSR
 - K should be sparse CSR
 
-7. Final conclusion
+8. Final conclusion
 - Unit tests: PASS
 - Output package exists: YES
 - Operator files exist: YES

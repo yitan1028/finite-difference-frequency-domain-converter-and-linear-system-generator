@@ -319,6 +319,74 @@ def validate_output_package() -> dict[str, Any]:
     return result
 
 
+def summarize_latest_solve() -> dict[str, Any]:
+    solved_outputs = OUTPUT_PACKAGE / "solved_outputs"
+    result: dict[str, Any] = {
+        "solved_outputs_exists": solved_outputs.is_dir(),
+        "latest_solve_checked": False,
+        "latest_solve_folder": None,
+        "overall_status": None,
+        "number_frequency_systems_found": None,
+        "number_solved_successfully": None,
+        "number_failed": None,
+        "all_solves_completed": None,
+        "all_residual_tests_passed": None,
+        "frequency_results": [],
+        "error": None,
+    }
+    if not solved_outputs.is_dir():
+        return result
+
+    candidates = [
+        path
+        for path in solved_outputs.iterdir()
+        if path.is_dir() and path.name.startswith("solve_")
+    ]
+    if not candidates:
+        return result
+
+    latest = max(candidates, key=lambda path: path.stat().st_mtime_ns)
+    result["latest_solve_folder"] = str(latest)
+    report_path = latest / "solve_report.json"
+    if not report_path.is_file():
+        result["error"] = f"Latest solve has no solve_report.json: {latest}"
+        return result
+    try:
+        with report_path.open("r", encoding="utf-8") as stream:
+            report = json.load(stream)
+        solver_summary = report["solver_summary"]
+        conclusion = report["conclusion"]
+        result.update(
+            {
+                "latest_solve_checked": True,
+                "overall_status": conclusion["overall_status"],
+                "number_frequency_systems_found": solver_summary[
+                    "number_frequency_systems_found"
+                ],
+                "number_solved_successfully": solver_summary[
+                    "number_solved_successfully"
+                ],
+                "number_failed": solver_summary["number_failed"],
+                "all_solves_completed": conclusion["all_solves_completed"],
+                "all_residual_tests_passed": conclusion[
+                    "all_residual_tests_passed"
+                ],
+                "frequency_results": [
+                    {
+                        "directory_name": item.get("directory_name"),
+                        "frequency_hz": item.get("frequency_hz"),
+                        "relative_residual_2": item.get("relative_residual_2"),
+                        "status": item.get("status"),
+                    }
+                    for item in report.get("frequency_results", [])
+                ],
+            }
+        )
+    except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        result["error"] = f"Could not read latest solve report: {exc}"
+    return result
+
+
 def yes_no(value: bool) -> str:
     return "YES" if value else "NO"
 
@@ -327,6 +395,7 @@ def make_text_report(
     timestamp: str,
     pytest_summary: dict[str, int | str],
     package: dict[str, Any],
+    latest_solve: dict[str, Any],
     overall_status: str,
 ) -> str:
     lines = [
@@ -442,17 +511,46 @@ def make_text_report(
                 ]
             )
 
+    lines.extend(["", "6. Latest classical solve summary"])
+    if not latest_solve["solved_outputs_exists"]:
+        lines.append("- no solved_outputs directory found; skipped solve summary")
+    elif not latest_solve["latest_solve_checked"]:
+        lines.append("- no readable solve run found")
+        if latest_solve["error"]:
+            lines.append(f"- error: {latest_solve['error']}")
+    else:
+        lines.extend(
+            [
+                f"- latest solve folder: {latest_solve['latest_solve_folder']}",
+                f"- frequency systems found: {latest_solve['number_frequency_systems_found']}",
+                f"- solved successfully: {latest_solve['number_solved_successfully']}",
+                f"- failed: {latest_solve['number_failed']}",
+                f"- all solves completed: {yes_no(latest_solve['all_solves_completed'])}",
+                f"- all residual tests passed: {yes_no(latest_solve['all_residual_tests_passed'])}",
+                f"- solve status: {latest_solve['overall_status']}",
+            ]
+        )
+        for item in latest_solve["frequency_results"]:
+            relative = item["relative_residual_2"]
+            relative_text = (
+                f"{relative:.16e}" if relative is not None else "undefined"
+            )
+            lines.append(
+                f"- {item['directory_name']}: frequency={item['frequency_hz']} Hz, "
+                f"relative_residual={relative_text}, status={item['status']}"
+            )
+
     lines.extend(
         [
             "",
-            "6. Expected success criteria",
+            "7. Expected success criteria",
             f"- A formula check passes if max_A_error <= {A_TOLERANCE:.0e}",
             f"- RHS formula check passes if max_Q_error <= {Q_TOLERANCE:.0e}",
             "- source_B and rhs_Q should have the same nonzero flat index for a point source",
             "- A_j should be sparse CSR",
             "- K should be sparse CSR",
             "",
-            "7. Final conclusion",
+            "8. Final conclusion",
             f"- Unit tests: {pytest_summary['status']}",
             f"- Output package exists: {yes_no(package['output_package_exists'])}",
             f"- Operator files exist: {yes_no(package['operator_files_exist'])}",
@@ -476,19 +574,28 @@ def main() -> int:
     pytest_output_path.write_text(pytest_output, encoding="utf-8")
 
     package = validate_output_package()
+    latest_solve = summarize_latest_solve()
     package_required_pass = (
         package["all_formula_checks_passed"]
         if package["output_package_exists"]
         else True
     )
+    solve_required_pass = (
+        latest_solve["overall_status"] == "PASS"
+        if latest_solve["latest_solve_checked"]
+        else latest_solve["error"] is None
+    )
     overall_status = (
-        "PASS" if pytest_returncode == 0 and package_required_pass else "FAIL"
+        "PASS"
+        if pytest_returncode == 0 and package_required_pass and solve_required_pass
+        else "FAIL"
     )
 
     text_report = make_text_report(
         timestamp=timestamp,
         pytest_summary=pytest_summary,
         package=package,
+        latest_solve=latest_solve,
         overall_status=overall_status,
     )
     text_report_path = RESULTS_DIR / "test_report.txt"
@@ -527,6 +634,7 @@ def main() -> int:
         "max_A_errors": package["max_A_errors"],
         "max_Q_errors": package["max_Q_errors"],
         "all_formula_checks_passed": package["all_formula_checks_passed"],
+        "latest_solve": latest_solve,
         "validation_errors": package["errors"],
         "overall_status": overall_status,
     }

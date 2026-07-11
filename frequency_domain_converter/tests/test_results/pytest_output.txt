@@ -3,13 +3,14 @@ platform darwin -- Python 3.11.5, pytest-7.4.0, pluggy-1.0.0
 rootdir: /Users/tansheng/research/quantum coding/frequency domain fft transformer/frequency_domain_converter
 configfile: pyproject.toml
 plugins: anyio-3.5.0
-collected 23 items
+collected 29 items
 
-tests/test_assembly.py ...                                               [ 13%]
-tests/test_config.py ...                                                 [ 26%]
-tests/test_export.py ...                                                 [ 39%]
-tests/test_operators.py .....                                            [ 60%]
-tests/test_source.py ....                                                [ 78%]
+tests/test_assembly.py ...                                               [ 10%]
+tests/test_config.py ...                                                 [ 20%]
+tests/test_export.py ...                                                 [ 31%]
+tests/test_operators.py .....                                            [ 48%]
+tests/test_solver.py ......                                              [ 68%]
+tests/test_source.py ....                                                [ 82%]
 tests/test_velocity_loader.py .....                                      [100%]
 
-============================== 23 passed in 0.43s ==============================
+============================== 29 passed in 0.60s ==============================
