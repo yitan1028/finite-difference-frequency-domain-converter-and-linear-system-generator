@@ -70,8 +70,7 @@ Version 1 intentionally has a narrow scope. It does not provide:
 
 - time stepping;
 - finite-difference time-domain (FDTD) simulation;
-- the final damped or complex frequency-domain boundary operator (the padded
-  geometry and damping profile are exported but not yet inserted into `A_j`);
+- a coordinate-stretched PML or a completed TD/FD boundary validation;
 - the shifted representation `H = M^{-1/2} K M^{-1/2}`;
 - a quantum solve;
 - a computed solution `U_j`;
@@ -259,8 +258,9 @@ forward_compatible_padding
 The legacy mode uses no external padding. The forward-compatible mode adds
 configurable padding on all four sides, extends velocity by edge replication,
 shifts source/receiver indices, and exports a quadratic damping profile based
-on the reference `forward.py` construction. The damping profile is diagnostic
-in this stage and is explicitly not applied to `A_j`.
+on the reference `forward.py` construction. The profile remains diagnostic in
+legacy `continuous_helmholtz` mode and is applied only when the explicit
+`forward_discrete_damped` frequency-operator mode is selected.
 
 The sparse stencil never wraps periodically. Terms that would fall outside
 the outer padded grid are omitted, equivalent to zero exterior ghost values.
@@ -340,7 +340,7 @@ Every run also exports `velocity_physical.npy`, `velocity_padded.npy`,
 | `config_resolved.json` | Resolved paths, selected velocity shape, source indices, and derived run settings. |
 | `velocity_selected.npy` | The selected physical `(nz, nx)` `float64` velocity map in m/s. |
 | `velocity_padded.npy` | The computational velocity grid after edge-replicated external padding. |
-| `damping_profile.npy` | Forward-compatible damping coefficients; not yet applied to `A_j`. |
+| `damping_profile.npy` | Forward-compatible damping coefficients; applied only in `forward_discrete_damped` mode. |
 | `physical_domain_mask.npy` / `padding_mask.npy` | Boolean masks separating physical and padding cells. |
 | `boundary_metadata.json` | Shapes, slices, padding, damping settings, and source/receiver mappings. |
 | `velocity_preview.png` | Optional image preview of the selected velocity map. |
@@ -565,8 +565,37 @@ The report checks:
 - the source nonzero index;
 - sparse CSR format.
 
-The current reference report records 42 collected tests, 42 passed tests, and
+The current reference report records 50 collected tests, 50 passed tests, and
 final status `PASS`.
+
+## Forward-discrete damped mode
+
+The opt-in matched mode derives its complex matrix directly from the discrete
+recurrence in `forward.py`; it does not replace the default continuous
+Helmholtz formulation. A minimal configuration addition is:
+
+```json
+{
+  "grid": {"dx_m": 10.0, "dz_m": 10.0, "spatial_order": 4},
+  "frequency_operator": {
+    "mode": "forward_discrete_damped",
+    "dt_s": 0.001,
+    "harmonic_convention": "exp(-i*omega*n*dt)"
+  },
+  "source": {
+    "type": "forward_time_ricker_dft",
+    "phase_mode": "forward_time_indexed",
+    "time_steps": 600
+  }
+}
+```
+
+This mode requires `forward_compatible_padding`, equal `dx_m` and `dz_m`, and
+the fourth-order stencil. It exports complex matrices/RHS arrays, the finite
+reference Ricker sequence, its raw positive-sign DFT coefficients, matrix
+real/imaginary diagnostics, and complete transform metadata. See
+`frequency_domain_converter/docs/forward_compatible_frequency_operator.md`
+for the recurrence and exact derivation.
 
 ## 15. Current validated example
 
@@ -625,8 +654,7 @@ implement a quantum algorithm.
 
 Potential future extensions include:
 
-- insertion of the exported damping profile into the final frequency-domain
-  boundary operator;
+- matched time-domain implementation and receiver-spectrum TD/FD comparison;
 - the shifted `H` representation;
 - multiple sources;
 - receiver extraction;

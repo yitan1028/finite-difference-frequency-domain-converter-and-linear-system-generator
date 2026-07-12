@@ -29,7 +29,7 @@
       "target_decay": 1e-7,
       "strength_scale": 1.0,
       "velocity_reference": "minimum",
-      "corner_combination": "maximum"
+      "corner_combination": "forward_x_overwrite"
     }
   },
   "source": {

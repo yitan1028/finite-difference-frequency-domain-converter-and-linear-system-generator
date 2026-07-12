@@ -137,3 +137,42 @@ def assemble_frequency_matrix(
     m_sparse = sp.diags(M_diag.astype(np.float64), offsets=0, format="csr")
     A = (K.tocsr().astype(np.float64) - (omega**2) * m_sparse).tocsr()
     return A, float(omega)
+
+
+def assemble_forward_discrete_damped_matrix(
+    K: sp.spmatrix,
+    M_diag: np.ndarray,
+    damping_profile: np.ndarray,
+    frequency_hz: float,
+    dt_s: float,
+) -> tuple[sp.csr_matrix, float, np.ndarray]:
+    """Assemble the exact harmonic symbol of the corrected forward recurrence."""
+    if frequency_hz <= 0.0:
+        raise ValueError("frequency_hz must be > 0.")
+    if dt_s <= 0.0:
+        raise ValueError("dt_s must be > 0.")
+    n = K.shape[0]
+    if K.shape != (n, n):
+        raise ValueError("K must be square.")
+    if M_diag.shape != (n,):
+        raise ValueError(f"M_diag shape must be {(n,)}, got {M_diag.shape}.")
+    damping_flat = np.asarray(damping_profile, dtype=np.float64).ravel(order="C")
+    if damping_flat.shape != (n,):
+        raise ValueError(
+            f"damping_profile must contain {n} values, got {damping_flat.shape}."
+        )
+
+    omega = 2.0 * np.pi * float(frequency_hz)
+    theta = omega * float(dt_s)
+    kappa = damping_flat * float(dt_s)
+    temporal_symbol = (
+        2.0 * np.cos(theta)
+        - 2.0
+        + kappa * (1.0 - np.exp(1j * theta))
+    ) / (float(dt_s) ** 2)
+    diagonal = M_diag.astype(np.float64) * temporal_symbol
+    A = (
+        K.tocsr().astype(np.complex128)
+        + sp.diags(diagonal, offsets=0, format="csr", dtype=np.complex128)
+    ).tocsr()
+    return A, float(omega), np.asarray(temporal_symbol, dtype=np.complex128)

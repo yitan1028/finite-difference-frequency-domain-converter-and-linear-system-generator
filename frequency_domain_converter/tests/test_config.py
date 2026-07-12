@@ -79,7 +79,7 @@ class ConfigTests(unittest.TestCase):
                 "target_decay": 1.0e-7,
                 "strength_scale": 0.75,
                 "velocity_reference": "minimum",
-                "corner_combination": "maximum",
+                "corner_combination": "forward_x_overwrite",
             },
         }
         data["receivers"] = {

@@ -56,6 +56,8 @@ def solve_sparse_system(
     frequency_hz: float = 0.0,
     omega_rad_s: float = 0.0,
     source_nonzero_indices: list[int] | None = None,
+    physical_domain_mask: np.ndarray | None = None,
+    padding_mask: np.ndarray | None = None,
     relative_residual_tolerance: float = RELATIVE_RESIDUAL_TOLERANCE,
 ) -> LinearSolveResult:
     """Solve one sparse system and compute solver-independent residual metrics."""
@@ -103,6 +105,8 @@ def solve_sparse_system(
         "A_nnz": int(matrix.nnz),
         "A_dtype": str(matrix.dtype),
         "A_is_csr": bool(sp.isspmatrix_csr(matrix)),
+        "A_max_abs_real": _sparse_max_abs(matrix.real),
+        "A_max_abs_imag": _sparse_max_abs(matrix.imag),
         "rhs_shape": list(rhs.shape),
         "solution_shape": list(U.shape),
         "solution_grid_shape": list(U_grid.shape),
@@ -115,6 +119,7 @@ def solve_sparse_system(
         "max_abs_residual": _max_abs(residual_vector),
         "solution_norm_2": float(np.linalg.norm(U)),
         "max_abs_solution": _max_abs(U),
+        "max_abs_real_solution": _max_abs(U.real),
         "min_real_solution": (
             float(np.min(real_values)) if real_stats_available else None
         ),
@@ -134,6 +139,13 @@ def solve_sparse_system(
     }
     if np.iscomplexobj(U):
         metrics["max_abs_imag_solution"] = _max_abs(U.imag)
+    metrics.update(
+        _region_amplitude_metrics(
+            U_grid,
+            physical_domain_mask=physical_domain_mask,
+            padding_mask=padding_mask,
+        )
+    )
 
     return LinearSolveResult(
         U=U,
@@ -167,6 +179,11 @@ def run_solver(
     n = int(resolved["N"])
     if nx * nz != n:
         raise ValueError(f"Resolved dimensions are inconsistent: {nz} * {nx} != {n}.")
+
+    physical_domain_mask = _load_optional_mask(
+        package_dir / "physical_domain_mask.npy", (nz, nx)
+    )
+    padding_mask = _load_optional_mask(package_dir / "padding_mask.npy", (nz, nx))
 
     system_specs = _system_specs(package_dir, manifest)
     if not system_specs:
@@ -222,6 +239,8 @@ def run_solver(
                 output_dir=frequency_output_dir,
                 nz=nz,
                 nx=nx,
+                physical_domain_mask=physical_domain_mask,
+                padding_mask=padding_mask,
                 relative_residual_tolerance=relative_residual_tolerance,
             )
         except Exception as exc:  # Keep the run report complete across frequencies.
@@ -299,6 +318,12 @@ def run_solver(
                 "solution_preview": (
                     f"frequency_solutions/{item['directory_name']}/solution_preview.png"
                 ),
+                "solution_magnitude_preview": (
+                    f"frequency_solutions/{item['directory_name']}/solution_magnitude_preview.png"
+                ),
+                "solution_phase_preview": (
+                    f"frequency_solutions/{item['directory_name']}/solution_phase_preview.png"
+                ),
                 "metrics": (
                     f"frequency_solutions/{item['directory_name']}/solve_metrics.json"
                 ),
@@ -326,6 +351,8 @@ def _solve_frequency(
     output_dir: Path,
     nz: int,
     nx: int,
+    physical_domain_mask: np.ndarray | None,
+    padding_mask: np.ndarray | None,
     relative_residual_tolerance: float,
 ) -> dict[str, Any]:
     A = sp.load_npz(spec["A_path"])
@@ -344,6 +371,8 @@ def _solve_frequency(
         frequency_hz=float(metadata["frequency_hz"]),
         omega_rad_s=float(metadata["omega_rad_s"]),
         source_nonzero_indices=source_indices,
+        physical_domain_mask=physical_domain_mask,
+        padding_mask=padding_mask,
         relative_residual_tolerance=relative_residual_tolerance,
     )
 
@@ -360,6 +389,12 @@ def _solve_frequency(
             str(spec["source_B_path"]) if spec["source_B_path"].is_file() else None
         ),
         "system_metadata_file": str(spec["system_json_path"]),
+        "frequency_operator_mode": metadata.get(
+            "frequency_operator_mode", "continuous_helmholtz"
+        ),
+        "damping_applied_to_frequency_matrix": metadata.get(
+            "damping_applied_to_frequency_matrix", False
+        ),
         "U_output_file": str(output_dir / "U.npy"),
         "U_grid_output_file": str(output_dir / "U_grid.npy"),
         "residual_output_file": str(output_dir / "residual_vector.npy"),
@@ -371,6 +406,24 @@ def _solve_frequency(
         result.U_grid,
         float(metrics["frequency_hz"]),
         metrics["relative_residual_2"],
+    )
+    _save_solution_component_preview(
+        output_dir / "solution_magnitude_preview.png",
+        np.abs(result.U_grid),
+        float(metrics["frequency_hz"]),
+        metrics["relative_residual_2"],
+        label="|U|",
+        component_name="magnitude",
+        cmap="viridis",
+    )
+    _save_solution_component_preview(
+        output_dir / "solution_phase_preview.png",
+        np.angle(result.U_grid),
+        float(metrics["frequency_hz"]),
+        metrics["relative_residual_2"],
+        label="phase (rad)",
+        component_name="phase",
+        cmap="twilight",
     )
     (output_dir / "solve_test_report.txt").write_text(
         _frequency_report_text(spec, output_dir, metrics), encoding="utf-8"
@@ -420,6 +473,11 @@ def _build_input_snapshot(
     operators = {
         "K_csr": package_dir / "operators" / "K_csr.npz",
         "M_diag": package_dir / "operators" / "M_diag.npy",
+        "damping_profile": package_dir / "damping_profile.npy",
+        "physical_domain_mask": package_dir / "physical_domain_mask.npy",
+        "padding_mask": package_dir / "padding_mask.npy",
+        "source_time_signal": package_dir / "source_time_signal.npy",
+        "source_metadata": package_dir / "source_metadata.json",
     }
     systems: list[dict[str, Any]] = []
     for spec in system_specs:
@@ -476,6 +534,12 @@ def _input_package_summary(
         "equation_form": manifest["equation_form"],
         "operator_definition": manifest["operator_definition"],
         "rhs_definition": manifest["rhs_definition"],
+        "frequency_operator_mode": manifest.get(
+            "frequency_operator_mode", "continuous_helmholtz"
+        ),
+        "damping_applied_to_frequency_matrix": manifest.get(
+            "damping_applied_to_frequency_matrix", False
+        ),
     }
 
 
@@ -495,6 +559,33 @@ def _save_solution_preview(
     image = ax.imshow(values, origin="upper", cmap="seismic", aspect="auto")
     ax.set_title(
         f"Frequency: {frequency_hz:g} Hz\nrelative residual: {residual_text}"
+    )
+    ax.set_xlabel("ix")
+    ax.set_ylabel("iz")
+    colorbar = fig.colorbar(image, ax=ax)
+    colorbar.set_label(label)
+    fig.savefig(path, dpi=160)
+    plt.close(fig)
+
+
+def _save_solution_component_preview(
+    path: Path,
+    values: np.ndarray,
+    frequency_hz: float,
+    relative_residual: float | None,
+    *,
+    label: str,
+    component_name: str,
+    cmap: str,
+) -> None:
+    residual_text = (
+        f"{relative_residual:.3e}" if relative_residual is not None else "undefined"
+    )
+    fig, ax = plt.subplots(figsize=(6.2, 5.0), constrained_layout=True)
+    image = ax.imshow(values, origin="upper", cmap=cmap, aspect="auto")
+    ax.set_title(
+        f"Solution {component_name}: {frequency_hz:g} Hz\n"
+        f"relative residual: {residual_text}"
     )
     ax.set_xlabel("ix")
     ax.set_ylabel("iz")
@@ -534,6 +625,9 @@ def _frequency_report_text(
         f"RHS norm (2): {metrics.get('rhs_norm_2')}",
         f"Relative residual (2): {relative_text}",
         f"Maximum absolute residual: {metrics.get('max_abs_residual')}",
+        f"Maximum absolute real solution: {metrics.get('max_abs_real_solution')}",
+        f"Maximum absolute imaginary solution: {metrics.get('max_abs_imag_solution')}",
+        f"Outer-boundary/interior mean amplitude ratio: {metrics.get('outer_to_physical_mean_abs_ratio')}",
         f"Pass criterion: relative residual <= {metrics.get('relative_residual_tolerance', RELATIVE_RESIDUAL_TOLERANCE):.1e} and finite solution",
         f"Residual test passed: {_yes_no(metrics.get('status') == 'PASS')}",
         f"Status: {metrics.get('status', 'FAIL')}",
@@ -576,6 +670,8 @@ def _overall_report_text(report: dict[str, Any]) -> str:
         f"- equation form: {summary['equation_form']}",
         f"- operator definition: {summary['operator_definition']}",
         f"- RHS definition: {summary['rhs_definition']}",
+        f"- frequency operator mode: {summary['frequency_operator_mode']}",
+        f"- damping applied to frequency matrix: {_yes_no(summary['damping_applied_to_frequency_matrix'])}",
         "",
         "3. Solver summary",
         f"- solver method: {solver['solver_method']}",
@@ -586,7 +682,7 @@ def _overall_report_text(report: dict[str, Any]) -> str:
         "",
         "4. Per-frequency summary",
         "",
-        "frequency_hz | A shape | A nnz | RHS shape | U shape | relative residual | max abs residual | solution norm | status",
+        "frequency_hz | A shape | A nnz | RHS shape | U shape | relative residual | outer/interior amplitude | status",
         "-" * 150,
     ]
     for item in report["frequency_results"]:
@@ -596,7 +692,7 @@ def _overall_report_text(report: dict[str, Any]) -> str:
             f"{item.get('frequency_hz')} | {item.get('A_shape')} | "
             f"{item.get('A_nnz')} | {item.get('rhs_shape')} | "
             f"{item.get('solution_shape')} | {relative_text} | "
-            f"{item.get('max_abs_residual')} | {item.get('solution_norm_2')} | "
+            f"{item.get('outer_to_physical_mean_abs_ratio')} | "
             f"{item.get('status')}"
         )
     lines.extend(
@@ -685,6 +781,66 @@ def _nonzero_row_indices(array: np.ndarray) -> list[int]:
 
 def _max_abs(array: np.ndarray) -> float:
     return float(np.max(np.abs(array))) if array.size else 0.0
+
+
+def _sparse_max_abs(matrix: sp.spmatrix) -> float:
+    return float(np.max(np.abs(matrix.data))) if matrix.nnz else 0.0
+
+
+def _load_optional_mask(path: Path, expected_shape: tuple[int, int]) -> np.ndarray | None:
+    if not path.is_file():
+        return None
+    mask = np.load(path, allow_pickle=False).astype(bool)
+    if mask.shape != expected_shape:
+        raise ValueError(
+            f"Mask {path} has shape {mask.shape}, expected {expected_shape}."
+        )
+    return mask
+
+
+def _region_amplitude_metrics(
+    U_grid: np.ndarray,
+    *,
+    physical_domain_mask: np.ndarray | None,
+    padding_mask: np.ndarray | None,
+) -> dict[str, float | None]:
+    metrics: dict[str, float | None] = {
+        "physical_mean_abs_solution": None,
+        "padding_mean_abs_solution": None,
+        "outer_boundary_mean_abs_solution": None,
+        "outer_to_physical_mean_abs_ratio": None,
+    }
+    if physical_domain_mask is None or padding_mask is None:
+        return metrics
+    if physical_domain_mask.shape != U_grid.shape or padding_mask.shape != U_grid.shape:
+        raise ValueError("Physical and padding masks must match U_grid shape.")
+    magnitude = np.abs(U_grid)
+    physical_values = magnitude[physical_domain_mask]
+    padding_values = magnitude[padding_mask]
+    outer_mask = np.zeros(U_grid.shape, dtype=bool)
+    outer_mask[0, :] = True
+    outer_mask[-1, :] = True
+    outer_mask[:, 0] = True
+    outer_mask[:, -1] = True
+    physical_mean = (
+        float(np.mean(physical_values)) if physical_values.size else None
+    )
+    outer_mean = float(np.mean(magnitude[outer_mask]))
+    metrics.update(
+        {
+            "physical_mean_abs_solution": physical_mean,
+            "padding_mean_abs_solution": (
+                float(np.mean(padding_values)) if padding_values.size else None
+            ),
+            "outer_boundary_mean_abs_solution": outer_mean,
+            "outer_to_physical_mean_abs_ratio": (
+                outer_mean / physical_mean
+                if physical_mean is not None and physical_mean > 0.0
+                else None
+            ),
+        }
+    )
+    return metrics
 
 
 def _yes_no(value: bool) -> str:

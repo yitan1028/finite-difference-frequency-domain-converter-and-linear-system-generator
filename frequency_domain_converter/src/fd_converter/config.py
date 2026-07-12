@@ -9,12 +9,16 @@ from typing import Any, Mapping, Optional
 
 SUPPORTED_BOUNDARIES = {"zero_exterior_ghost", "forward_compatible_padding"}
 SUPPORTED_SPATIAL_ORDERS = {2, 4}
+SUPPORTED_FREQUENCY_OPERATOR_MODES = {
+    "continuous_helmholtz",
+    "forward_discrete_damped",
+}
 SUPPORTED_DAMPING_PROFILES = {"quadratic"}
 SUPPORTED_DAMPING_VELOCITY_REFERENCES = {"minimum"}
-SUPPORTED_DAMPING_CORNER_COMBINATIONS = {"maximum"}
-SUPPORTED_SOURCE_TYPES = {"point_ricker_spectrum"}
+SUPPORTED_DAMPING_CORNER_COMBINATIONS = {"forward_x_overwrite"}
+SUPPORTED_SOURCE_TYPES = {"point_ricker_spectrum", "forward_time_ricker_dft"}
 SUPPORTED_SOURCE_POSITION_MODES = {"fractional", "grid_index"}
-SUPPORTED_SOURCE_PHASE_MODES = {"zero"}
+SUPPORTED_SOURCE_PHASE_MODES = {"zero", "forward_time_indexed"}
 SUPPORTED_INLINE_VELOCITY_MODES = {"inline_layered"}
 
 
@@ -48,7 +52,7 @@ class DampingProfileConfig:
     target_decay: float = 1.0e-7
     strength_scale: float = 1.0
     velocity_reference: str = "minimum"
-    corner_combination: str = "maximum"
+    corner_combination: str = "forward_x_overwrite"
 
 
 @dataclass(frozen=True)
@@ -59,6 +63,13 @@ class BoundaryConfig:
     left_padding_cells: int = 0
     right_padding_cells: int = 0
     damping: DampingProfileConfig = DampingProfileConfig()
+
+
+@dataclass(frozen=True)
+class FrequencyOperatorConfig:
+    mode: str = "continuous_helmholtz"
+    dt_s: Optional[float] = None
+    harmonic_convention: str = "exp(-i*omega*n*dt)"
 
 
 @dataclass(frozen=True)
@@ -77,6 +88,7 @@ class SourceConfig:
     peak_frequency_hz: float
     strength: float
     phase_mode: str
+    time_steps: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -100,6 +112,7 @@ class RunConfig:
     grid: GridConfig
     frequencies_hz: tuple[float, ...]
     boundary: BoundaryConfig
+    frequency_operator: FrequencyOperatorConfig
     source: SourceConfig
     receivers: ReceiverConfig
     output: OutputConfig
@@ -156,7 +169,14 @@ def load_config(path: str | Path) -> RunConfig:
         )
     boundary = _parse_boundary(boundary_raw, boundary_type)
 
+    frequency_operator = _parse_frequency_operator(raw.get("frequency_operator"))
     source = _parse_source(_require_mapping(raw, "source", "config"))
+    _validate_forward_discrete_contract(
+        grid=grid,
+        boundary=boundary,
+        frequency_operator=frequency_operator,
+        source=source,
+    )
     receivers = _parse_receivers(raw.get("receivers"))
     output = _parse_output(_require_mapping(raw, "output", "config"))
 
@@ -167,6 +187,7 @@ def load_config(path: str | Path) -> RunConfig:
         grid=grid,
         frequencies_hz=frequencies,
         boundary=boundary,
+        frequency_operator=frequency_operator,
         source=source,
         receivers=receivers,
         output=output,
@@ -267,13 +288,96 @@ def _parse_source(raw: Mapping[str, Any]) -> SourceConfig:
             f"Unsupported source.phase_mode {phase_mode!r}; supported values: "
             f"{sorted(SUPPORTED_SOURCE_PHASE_MODES)}."
         )
+    time_steps = raw.get("time_steps")
+    if time_steps is not None:
+        time_steps = _positive_int_value(time_steps, "source.time_steps")
+    if source_type == "point_ricker_spectrum":
+        if phase_mode != "zero":
+            raise ConfigError(
+                "source.type='point_ricker_spectrum' requires phase_mode='zero'."
+            )
+        if time_steps is not None:
+            raise ConfigError(
+                "source.time_steps is only valid for forward_time_ricker_dft."
+            )
+    else:
+        if phase_mode != "forward_time_indexed":
+            raise ConfigError(
+                "source.type='forward_time_ricker_dft' requires "
+                "phase_mode='forward_time_indexed'."
+            )
+        if time_steps is None:
+            raise ConfigError(
+                "source.type='forward_time_ricker_dft' requires source.time_steps."
+            )
     return SourceConfig(
         type=source_type,
         position=position,
         peak_frequency_hz=peak_frequency,
         strength=strength,
         phase_mode=phase_mode,
+        time_steps=time_steps,
     )
+
+
+def _parse_frequency_operator(raw: Any) -> FrequencyOperatorConfig:
+    if raw is None:
+        return FrequencyOperatorConfig()
+    if not isinstance(raw, dict):
+        raise ConfigError("config.frequency_operator must be an object.")
+    mode = _require_nonempty_str(raw, "mode", "frequency_operator")
+    if mode not in SUPPORTED_FREQUENCY_OPERATOR_MODES:
+        raise ConfigError(
+            f"Unsupported frequency_operator.mode {mode!r}; supported values: "
+            f"{sorted(SUPPORTED_FREQUENCY_OPERATOR_MODES)}."
+        )
+    dt_s = raw.get("dt_s")
+    if dt_s is not None:
+        dt_s = _positive_float_value(dt_s, "frequency_operator.dt_s")
+    convention = raw.get("harmonic_convention", "exp(-i*omega*n*dt)")
+    if convention != "exp(-i*omega*n*dt)":
+        raise ConfigError(
+            "frequency_operator.harmonic_convention must be "
+            "'exp(-i*omega*n*dt)'."
+        )
+    if mode == "forward_discrete_damped" and dt_s is None:
+        raise ConfigError(
+            "frequency_operator.mode='forward_discrete_damped' requires dt_s."
+        )
+    return FrequencyOperatorConfig(
+        mode=mode, dt_s=dt_s, harmonic_convention=convention
+    )
+
+
+def _validate_forward_discrete_contract(
+    *,
+    grid: GridConfig,
+    boundary: BoundaryConfig,
+    frequency_operator: FrequencyOperatorConfig,
+    source: SourceConfig,
+) -> None:
+    if frequency_operator.mode != "forward_discrete_damped":
+        if source.type == "forward_time_ricker_dft":
+            raise ConfigError(
+                "forward_time_ricker_dft requires "
+                "frequency_operator.mode='forward_discrete_damped'."
+            )
+        return
+    if boundary.type != "forward_compatible_padding":
+        raise ConfigError(
+            "forward_discrete_damped requires "
+            "boundary.type='forward_compatible_padding'."
+        )
+    if grid.spatial_order != 4:
+        raise ConfigError("forward_discrete_damped requires grid.spatial_order=4.")
+    if not math.isclose(grid.dx_m, grid.dz_m, rel_tol=0.0, abs_tol=1.0e-12):
+        raise ConfigError(
+            "forward_discrete_damped requires dx_m == dz_m to match forward.py."
+        )
+    if source.type != "forward_time_ricker_dft":
+        raise ConfigError(
+            "forward_discrete_damped requires source.type='forward_time_ricker_dft'."
+        )
 
 
 def _parse_boundary(
@@ -316,7 +420,9 @@ def _parse_boundary(
             f"{velocity_reference!r}; supported values: "
             f"{sorted(SUPPORTED_DAMPING_VELOCITY_REFERENCES)}."
         )
-    corner_combination = damping_raw.get("corner_combination", "maximum")
+    corner_combination = damping_raw.get(
+        "corner_combination", "forward_x_overwrite"
+    )
     if corner_combination not in SUPPORTED_DAMPING_CORNER_COMBINATIONS:
         raise ConfigError(
             "Unsupported boundary.damping.corner_combination "
@@ -467,6 +573,13 @@ def _nonnegative_int_value(value: Any, name: str) -> int:
     if value < 0:
         raise ConfigError(f"{name} must be >= 0.")
     return value
+
+
+def _positive_int_value(value: Any, name: str) -> int:
+    result = _nonnegative_int_value(value, name)
+    if result == 0:
+        raise ConfigError(f"{name} must be > 0.")
+    return result
 
 
 def _optional_bool(

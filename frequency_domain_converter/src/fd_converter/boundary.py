@@ -37,6 +37,7 @@ class PaddedDomain:
     physical_z_slice: slice
     physical_x_slice: slice
     damping_side_maxima: dict[str, float]
+    damping_compatibility_audit: dict[str, object]
 
     @property
     def physical_shape(self) -> tuple[int, int]:
@@ -88,6 +89,14 @@ def build_padded_domain(
         dz_m=dz_m,
         boundary=boundary,
     )
+    compatibility_audit = audit_forward_damping_compatibility(
+        physical,
+        damping,
+        widths,
+        dx_m=dx_m,
+        dz_m=dz_m,
+        boundary=boundary,
+    )
     return PaddedDomain(
         velocity_physical=physical.copy(),
         velocity_padded=padded,
@@ -98,6 +107,7 @@ def build_padded_domain(
         physical_z_slice=z_slice,
         physical_x_slice=x_slice,
         damping_side_maxima=side_maxima,
+        damping_compatibility_audit=compatibility_audit,
     )
 
 
@@ -129,34 +139,131 @@ def build_damping_profile(
     )
 
     if widths.top:
-        damping[: widths.top, :] = np.maximum(
-            damping[: widths.top, :], top[:, None]
-        )
+        damping[: widths.top, :] = top[:, None]
         side_maxima["top"] = float(np.max(top))
     else:
         side_maxima["top"] = 0.0
     if widths.bottom:
-        damping[-widths.bottom :, :] = np.maximum(
-            damping[-widths.bottom :, :], bottom[:, None]
-        )
+        damping[-widths.bottom :, :] = bottom[:, None]
         side_maxima["bottom"] = float(np.max(bottom))
     else:
         side_maxima["bottom"] = 0.0
     if widths.left:
-        damping[:, : widths.left] = np.maximum(
-            damping[:, : widths.left], left[None, :]
-        )
+        damping[:, : widths.left] = left[None, :]
         side_maxima["left"] = float(np.max(left))
     else:
         side_maxima["left"] = 0.0
     if widths.right:
-        damping[:, -widths.right :] = np.maximum(
-            damping[:, -widths.right :], right[None, :]
-        )
+        damping[:, -widths.right :] = right[None, :]
         side_maxima["right"] = float(np.max(right))
     else:
         side_maxima["right"] = 0.0
     return damping, side_maxima
+
+
+def build_forward_reference_damping(
+    velocity_physical: np.ndarray,
+    *,
+    padding_cells: int,
+    spacing_m: float,
+) -> np.ndarray:
+    """Reproduce forward.py get_Abc for one selected 2D velocity model."""
+    if padding_cells == 0:
+        return np.zeros_like(velocity_physical, dtype=np.float64)
+    if padding_cells < 2:
+        raise ValueError("forward.py damping requires padding_cells >= 2.")
+    padded = np.pad(
+        np.asarray(velocity_physical, dtype=np.float64),
+        ((padding_cells, padding_cells), (padding_cells, padding_cells)),
+        mode="edge",
+    )
+    damping = np.zeros_like(padded, dtype=np.float64)
+    velocity_min = float(np.min(padded))
+    thickness_m = (padding_cells - 1) * float(spacing_m)
+    kappa_max = (
+        3.0 * velocity_min * np.log(1.0e7) / (2.0 * thickness_m)
+    )
+    distance = np.arange(padding_cells, dtype=np.float64) * float(spacing_m)
+    profile = kappa_max * (distance / thickness_m) ** 2
+
+    # Preserve the exact assignment order in forward.py: x sides overwrite
+    # corner values written by the z sides.
+    damping[:padding_cells, :] = profile[::-1, None]
+    damping[-padding_cells:, :] = profile[:, None]
+    damping[:, :padding_cells] = profile[None, ::-1]
+    damping[:, -padding_cells:] = profile[None, :]
+    return damping
+
+
+def audit_forward_damping_compatibility(
+    velocity_physical: np.ndarray,
+    damping_profile: np.ndarray,
+    widths: PaddingWidths,
+    *,
+    dx_m: float,
+    dz_m: float,
+    boundary: BoundaryConfig,
+) -> dict[str, object]:
+    symmetric_width = len({widths.top, widths.bottom, widths.left, widths.right}) == 1
+    equal_spacing = bool(np.isclose(dx_m, dz_m, rtol=0.0, atol=1.0e-15))
+    reference_parameters = bool(
+        boundary.damping.profile == "quadratic"
+        and boundary.damping.power == 2.0
+        and boundary.damping.target_decay == 1.0e-7
+        and boundary.damping.strength_scale == 1.0
+        and boundary.damping.velocity_reference == "minimum"
+        and boundary.damping.corner_combination == "forward_x_overwrite"
+    )
+    evaluated = symmetric_width and equal_spacing and reference_parameters
+    if not evaluated:
+        return {
+            "evaluated": False,
+            "compatible": None,
+            "maximum_absolute_difference": None,
+            "reason": (
+                "Exact forward.py audit requires equal padding on all sides, "
+                "dx_m == dz_m, and unscaled reference damping parameters."
+            ),
+        }
+    width = widths.top
+    reference = build_forward_reference_damping(
+        velocity_physical,
+        padding_cells=width,
+        spacing_m=dx_m,
+    )
+    maximum_difference = float(np.max(np.abs(reference - damping_profile)))
+    return {
+        "evaluated": True,
+        "compatible": bool(maximum_difference <= 1.0e-12),
+        "maximum_absolute_difference": maximum_difference,
+        "reference_shape": list(reference.shape),
+        "current_shape": list(damping_profile.shape),
+        "physical_domain_zero": bool(
+            np.all(
+                reference[
+                    width : width + velocity_physical.shape[0],
+                    width : width + velocity_physical.shape[1],
+                ]
+                == 0.0
+            )
+        ),
+        "reference_outer_edge_maximum": float(np.max(reference)),
+        "current_outer_edge_maximum": float(np.max(damping_profile)),
+        "corner_values": {
+            "reference": [
+                float(reference[0, 0]),
+                float(reference[0, -1]),
+                float(reference[-1, 0]),
+                float(reference[-1, -1]),
+            ],
+            "current": [
+                float(damping_profile[0, 0]),
+                float(damping_profile[0, -1]),
+                float(damping_profile[-1, 0]),
+                float(damping_profile[-1, -1]),
+            ],
+        },
+    }
 
 
 def physical_coordinate_to_physical_index(
@@ -289,7 +396,8 @@ def _side_profile(
         / (2.0 * thickness_m)
         * boundary.damping.strength_scale
     )
-    normalized = np.linspace(0.0, 1.0, width, dtype=np.float64)
+    distance = np.arange(width, dtype=np.float64) * float(spacing_m)
+    normalized = distance / thickness_m
     values = maximum * normalized ** boundary.damping.power
     return values[::-1] if outer_first else values
 

@@ -3,7 +3,7 @@ Test Report
 ==================================================
 
 1. Run information
-- timestamp: 2026-07-12T00:22:46-04:00
+- timestamp: 2026-07-12T00:49:00-04:00
 - project root: /Users/tansheng/research/quantum coding/frequency domain fft transformer/frequency_domain_converter
 - Python version: 3.11.5
 - NumPy version: 1.24.3
@@ -11,8 +11,8 @@ Test Report
 - pytest version: 7.4.0
 
 2. Pytest summary
-- total tests collected: 42
-- passed: 42
+- total tests collected: 50
+- passed: 50
 - failed: 0
 - skipped: 0
 - collection/runtime errors: 0

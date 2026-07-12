@@ -22,12 +22,15 @@ from .config import (
 )
 from .operators import (
     assemble_frequency_matrix,
+    assemble_forward_discrete_damped_matrix,
     build_medium_operator,
     build_spatial_operator,
 )
 from .source import (
     ResolvedSource,
     build_source_matrix,
+    forward_ricker_dft,
+    forward_ricker_time_signal,
     resolve_source_position,
     ricker_zero_phase_spectrum,
     transform_rhs,
@@ -44,12 +47,13 @@ from .velocity import VelocityLoadResult, load_velocity
 class FrequencySystem:
     frequency_hz: float
     omega_rad_s: float
-    source_amplitude: float
+    source_amplitude: float | complex
     A: sp.csr_matrix
     B: np.ndarray
     Q: np.ndarray
     directory_name: str
     symmetry: dict
+    temporal_symbol: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
@@ -68,6 +72,8 @@ class ConversionResult:
     frequencies_hz: np.ndarray
     omega_rad_s: np.ndarray
     source_spectrum: np.ndarray
+    source_time_signal: np.ndarray | None
+    source_transform_metadata: dict[str, object]
     systems: list[FrequencySystem]
     K_symmetry: dict
 
@@ -75,21 +81,23 @@ class ConversionResult:
 def package_system(
     frequency_hz: float,
     omega_rad_s: float,
-    source_amplitude: float,
+    source_amplitude: float | complex,
     A: sp.csr_matrix,
     B: np.ndarray,
     Q: np.ndarray,
     symmetry: dict,
+    temporal_symbol: np.ndarray | None = None,
 ) -> FrequencySystem:
     return FrequencySystem(
         frequency_hz=float(frequency_hz),
         omega_rad_s=float(omega_rad_s),
-        source_amplitude=float(source_amplitude),
-        A=A.tocsr().astype(np.float64),
-        B=np.asarray(B, dtype=np.float64),
-        Q=np.asarray(Q, dtype=np.float64),
+        source_amplitude=source_amplitude,
+        A=A.tocsr(),
+        B=np.asarray(B),
+        Q=np.asarray(Q),
         directory_name=frequency_directory_name(float(frequency_hz)),
         symmetry=symmetry,
+        temporal_symbol=temporal_symbol,
     )
 
 
@@ -128,6 +136,62 @@ def assemble_frequency_systems(
         omega_values.append(omega)
 
     return source_spectrum, np.asarray(omega_values, dtype=np.float64), systems
+
+
+def assemble_forward_discrete_systems(
+    K: sp.csr_matrix,
+    M_diag: np.ndarray,
+    damping_profile: np.ndarray,
+    frequencies_hz: np.ndarray,
+    source_flat_index: int,
+    source_peak_frequency_hz: float,
+    source_strength: float,
+    dt_s: float,
+    time_steps: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[FrequencySystem]]:
+    source_time_signal = forward_ricker_time_signal(
+        source_peak_frequency_hz,
+        dt_s,
+        time_steps,
+        source_strength,
+    )
+    source_spectrum = forward_ricker_dft(
+        frequencies_hz, source_time_signal, dt_s
+    )
+    omega_values: list[float] = []
+    systems: list[FrequencySystem] = []
+    n = K.shape[0]
+    for frequency_hz, source_amplitude in zip(frequencies_hz, source_spectrum):
+        A, omega, temporal_symbol = assemble_forward_discrete_damped_matrix(
+            K,
+            M_diag,
+            damping_profile,
+            float(frequency_hz),
+            dt_s,
+        )
+        B = build_source_matrix(n, source_flat_index, complex(source_amplitude))
+        Q = B.copy()
+        validate_frequency_system(A, B, Q, n)
+        symmetry = sparse_symmetry_diagnostic(A)
+        systems.append(
+            package_system(
+                frequency_hz=float(frequency_hz),
+                omega_rad_s=omega,
+                source_amplitude=complex(source_amplitude),
+                A=A,
+                B=B,
+                Q=Q,
+                symmetry=symmetry,
+                temporal_symbol=temporal_symbol,
+            )
+        )
+        omega_values.append(omega)
+    return (
+        source_time_signal,
+        source_spectrum,
+        np.asarray(omega_values, dtype=np.float64),
+        systems,
+    )
 
 
 def run_conversion(
@@ -188,14 +252,49 @@ def run_conversion(
     )
     frequencies_hz = np.asarray(config.frequencies_hz, dtype=np.float64)
 
-    source_spectrum, omega_rad_s, systems = assemble_frequency_systems(
-        K=K,
-        M_diag=M_diag,
-        frequencies_hz=frequencies_hz,
-        source_flat_index=source_mapping.padded_flat_index,
-        source_peak_frequency_hz=config.source.peak_frequency_hz,
-        source_strength=config.source.strength,
-    )
+    if config.frequency_operator.mode == "continuous_helmholtz":
+        source_spectrum, omega_rad_s, systems = assemble_frequency_systems(
+            K=K,
+            M_diag=M_diag,
+            frequencies_hz=frequencies_hz,
+            source_flat_index=source_mapping.padded_flat_index,
+            source_peak_frequency_hz=config.source.peak_frequency_hz,
+            source_strength=config.source.strength,
+        )
+        source_time_signal = None
+        source_transform_metadata: dict[str, object] = {
+            "mode": "analytic_zero_phase_ricker_spectrum",
+            "phase_mode": "zero",
+        }
+    else:
+        assert config.frequency_operator.dt_s is not None
+        assert config.source.time_steps is not None
+        (
+            source_time_signal,
+            source_spectrum,
+            omega_rad_s,
+            systems,
+        ) = assemble_forward_discrete_systems(
+            K=K,
+            M_diag=M_diag,
+            damping_profile=padded_domain.damping_profile,
+            frequencies_hz=frequencies_hz,
+            source_flat_index=source_mapping.padded_flat_index,
+            source_peak_frequency_hz=config.source.peak_frequency_hz,
+            source_strength=config.source.strength,
+            dt_s=config.frequency_operator.dt_s,
+            time_steps=config.source.time_steps,
+        )
+        source_transform_metadata = {
+            "mode": "forward_time_ricker_raw_dft",
+            "harmonic_convention": config.frequency_operator.harmonic_convention,
+            "analysis_kernel": "exp(+i*omega*n*dt)",
+            "normalization": "raw unnormalized discrete sum",
+            "dt_s": config.frequency_operator.dt_s,
+            "time_steps": config.source.time_steps,
+            "reference_injection": "(v * dt)^2 * source_time[n] at padded source",
+            "solver_rhs_after_row_scaling": "Q_j = S_j * e_p",
+        }
 
     result = ConversionResult(
         config=config,
@@ -212,6 +311,8 @@ def run_conversion(
         frequencies_hz=frequencies_hz,
         omega_rad_s=omega_rad_s,
         source_spectrum=source_spectrum,
+        source_time_signal=source_time_signal,
+        source_transform_metadata=source_transform_metadata,
         systems=systems,
         K_symmetry=K_symmetry,
     )

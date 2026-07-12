@@ -31,6 +31,56 @@ def ricker_zero_phase_spectrum(
     return spectrum.astype(np.float64)
 
 
+def forward_ricker_time_signal(
+    peak_frequency_hz: float,
+    dt_s: float,
+    time_steps: int,
+    strength: float = 1.0,
+) -> np.ndarray:
+    """Reproduce the finite, time-indexed Ricker sequence in forward.py."""
+    if peak_frequency_hz <= 0.0 or dt_s <= 0.0:
+        raise ValueError("peak_frequency_hz and dt_s must be > 0.")
+    if time_steps <= 0:
+        raise ValueError("time_steps must be > 0.")
+    nw_value = 2.2 / float(peak_frequency_hz) / float(dt_s)
+    nw = int(2.0 * np.floor(nw_value / 2.0) + 1.0)
+    if nw > time_steps:
+        raise ValueError(
+            f"time_steps={time_steps} is shorter than reference Ricker nw={nw}."
+        )
+    nc = np.floor(nw / 2.0)
+    sample = np.arange(nw, dtype=np.float64)
+    alpha = (nc - sample) * float(peak_frequency_hz) * float(dt_s) * np.pi
+    beta = alpha**2
+    wavelet = np.zeros(time_steps, dtype=np.float64)
+    wavelet[:nw] = float(strength) * (1.0 - 2.0 * beta) * np.exp(-beta)
+    return wavelet
+
+
+def forward_ricker_dft(
+    frequencies_hz: np.ndarray | list[float] | tuple[float, ...],
+    time_signal: np.ndarray,
+    dt_s: float,
+) -> np.ndarray:
+    """Raw positive-sign DTFT coefficients for exp(-i*omega*n*dt) modes."""
+    if dt_s <= 0.0:
+        raise ValueError("dt_s must be > 0.")
+    frequencies = np.asarray(frequencies_hz, dtype=np.float64)
+    signal = np.asarray(time_signal, dtype=np.float64)
+    if signal.ndim != 1:
+        raise ValueError("time_signal must be one-dimensional.")
+    sample = np.arange(signal.size, dtype=np.float64)
+    phase = np.exp(
+        1j
+        * 2.0
+        * np.pi
+        * frequencies[:, None]
+        * sample[None, :]
+        * float(dt_s)
+    )
+    return np.asarray(phase @ signal, dtype=np.complex128)
+
+
 def resolve_source_position(
     position: SourcePositionConfig, nz: int, nx: int
 ) -> ResolvedSource:
@@ -76,13 +126,16 @@ def flatten_index(iz: int, ix: int, nx: int) -> int:
     return int(iz * nx + ix)
 
 
-def build_source_matrix(n: int, source_flat_index: int, source_amplitude: float) -> np.ndarray:
+def build_source_matrix(
+    n: int, source_flat_index: int, source_amplitude: float | complex
+) -> np.ndarray:
     if not 0 <= source_flat_index < n:
         raise ValueError(
             f"source_flat_index={source_flat_index} is outside [0, {n - 1}]."
         )
-    B = np.zeros((n, 1), dtype=np.float64)
-    B[source_flat_index, 0] = float(source_amplitude)
+    dtype = np.complex128 if np.iscomplexobj(source_amplitude) else np.float64
+    B = np.zeros((n, 1), dtype=dtype)
+    B[source_flat_index, 0] = source_amplitude
     return B
 
 
