@@ -7,6 +7,13 @@ from typing import Optional
 import numpy as np
 import scipy.sparse as sp
 
+from .boundary import (
+    GridIndexMapping,
+    PaddedDomain,
+    build_padded_domain,
+    shift_receiver_indices,
+    shift_source_index,
+)
 from .config import (
     RunConfig,
     find_project_root,
@@ -51,9 +58,13 @@ class ConversionResult:
     project_root: Path
     output_dir: Path
     velocity_result: VelocityLoadResult
+    padded_domain: PaddedDomain
     K: sp.csr_matrix
     M_diag: np.ndarray
     source: ResolvedSource
+    source_mapping: GridIndexMapping
+    receivers: list[ResolvedSource]
+    receiver_mappings: list[GridIndexMapping]
     frequencies_hz: np.ndarray
     omega_rad_s: np.ndarray
     source_spectrum: np.ndarray
@@ -127,7 +138,15 @@ def run_conversion(
     output_dir = resolve_output_dir(config.output.directory, root)
 
     velocity_result = load_velocity(config, root)
-    velocity = velocity_result.velocity
+    velocity_physical = velocity_result.velocity
+    physical_nz, physical_nx = velocity_physical.shape
+    padded_domain = build_padded_domain(
+        velocity_physical,
+        config.boundary,
+        dx_m=config.grid.dx_m,
+        dz_m=config.grid.dz_m,
+    )
+    velocity = padded_domain.velocity_padded
     nz, nx = velocity.shape
     n = nz * nx
 
@@ -137,19 +156,43 @@ def run_conversion(
         dx_m=config.grid.dx_m,
         dz_m=config.grid.dz_m,
         boundary_type=config.boundary.type,
+        spatial_order=config.grid.spatial_order,
     )
     validate_matrix_shape(K, (n, n), "K")
     K_symmetry = sparse_symmetry_diagnostic(K)
 
     M_diag = build_medium_operator(velocity)
-    source = resolve_source_position(config.source.position, nz=nz, nx=nx)
+    source = resolve_source_position(
+        config.source.position, nz=physical_nz, nx=physical_nx
+    )
+    source_mapping = shift_source_index(
+        source.iz,
+        source.ix,
+        physical_nz=physical_nz,
+        physical_nx=physical_nx,
+        padded_nz=nz,
+        padded_nx=nx,
+        padding=padded_domain.padding,
+    )
+    receivers = [
+        resolve_source_position(position, nz=physical_nz, nx=physical_nx)
+        for position in config.receivers.positions
+    ]
+    receiver_mappings = shift_receiver_indices(
+        [(receiver.iz, receiver.ix) for receiver in receivers],
+        physical_nz=physical_nz,
+        physical_nx=physical_nx,
+        padded_nz=nz,
+        padded_nx=nx,
+        padding=padded_domain.padding,
+    )
     frequencies_hz = np.asarray(config.frequencies_hz, dtype=np.float64)
 
     source_spectrum, omega_rad_s, systems = assemble_frequency_systems(
         K=K,
         M_diag=M_diag,
         frequencies_hz=frequencies_hz,
-        source_flat_index=source.flat_index,
+        source_flat_index=source_mapping.padded_flat_index,
         source_peak_frequency_hz=config.source.peak_frequency_hz,
         source_strength=config.source.strength,
     )
@@ -159,9 +202,13 @@ def run_conversion(
         project_root=root,
         output_dir=output_dir,
         velocity_result=velocity_result,
+        padded_domain=padded_domain,
         K=K,
         M_diag=M_diag,
         source=source,
+        source_mapping=source_mapping,
+        receivers=receivers,
+        receiver_mappings=receiver_mappings,
         frequencies_hz=frequencies_hz,
         omega_rad_s=omega_rad_s,
         source_spectrum=source_spectrum,

@@ -7,7 +7,11 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 
 
-SUPPORTED_BOUNDARIES = {"zero_exterior_ghost"}
+SUPPORTED_BOUNDARIES = {"zero_exterior_ghost", "forward_compatible_padding"}
+SUPPORTED_SPATIAL_ORDERS = {2, 4}
+SUPPORTED_DAMPING_PROFILES = {"quadratic"}
+SUPPORTED_DAMPING_VELOCITY_REFERENCES = {"minimum"}
+SUPPORTED_DAMPING_CORNER_COMBINATIONS = {"maximum"}
 SUPPORTED_SOURCE_TYPES = {"point_ricker_spectrum"}
 SUPPORTED_SOURCE_POSITION_MODES = {"fractional", "grid_index"}
 SUPPORTED_SOURCE_PHASE_MODES = {"zero"}
@@ -34,11 +38,27 @@ class InlineVelocityConfig:
 class GridConfig:
     dx_m: float
     dz_m: float
+    spatial_order: int = 2
+
+
+@dataclass(frozen=True)
+class DampingProfileConfig:
+    profile: str = "quadratic"
+    power: float = 2.0
+    target_decay: float = 1.0e-7
+    strength_scale: float = 1.0
+    velocity_reference: str = "minimum"
+    corner_combination: str = "maximum"
 
 
 @dataclass(frozen=True)
 class BoundaryConfig:
     type: str
+    top_padding_cells: int = 0
+    bottom_padding_cells: int = 0
+    left_padding_cells: int = 0
+    right_padding_cells: int = 0
+    damping: DampingProfileConfig = DampingProfileConfig()
 
 
 @dataclass(frozen=True)
@@ -60,6 +80,11 @@ class SourceConfig:
 
 
 @dataclass(frozen=True)
+class ReceiverConfig:
+    positions: tuple[SourcePositionConfig, ...] = ()
+
+
+@dataclass(frozen=True)
 class OutputConfig:
     directory: str
     export_npz: bool = True
@@ -76,6 +101,7 @@ class RunConfig:
     frequencies_hz: tuple[float, ...]
     boundary: BoundaryConfig
     source: SourceConfig
+    receivers: ReceiverConfig
     output: OutputConfig
     raw: dict[str, Any]
     config_path: Path
@@ -99,9 +125,18 @@ def load_config(path: str | Path) -> RunConfig:
     velocity_config = _parse_inline_velocity(raw["velocity"]) if has_velocity else None
 
     grid_raw = _require_mapping(raw, "grid", "config")
+    spatial_order = grid_raw.get("spatial_order", 2)
+    if isinstance(spatial_order, bool) or not isinstance(spatial_order, int):
+        raise ConfigError("grid.spatial_order must be an integer.")
+    if spatial_order not in SUPPORTED_SPATIAL_ORDERS:
+        raise ConfigError(
+            f"Unsupported grid.spatial_order {spatial_order!r}; supported values: "
+            f"{sorted(SUPPORTED_SPATIAL_ORDERS)}."
+        )
     grid = GridConfig(
         dx_m=_require_positive_float(grid_raw, "dx_m", "grid"),
         dz_m=_require_positive_float(grid_raw, "dz_m", "grid"),
+        spatial_order=spatial_order,
     )
 
     frequencies_raw = _require_key(raw, "frequencies_hz", "config")
@@ -119,9 +154,10 @@ def load_config(path: str | Path) -> RunConfig:
             "Unsupported boundary.type "
             f"{boundary_type!r}; supported values: {sorted(SUPPORTED_BOUNDARIES)}."
         )
-    boundary = BoundaryConfig(type=boundary_type)
+    boundary = _parse_boundary(boundary_raw, boundary_type)
 
     source = _parse_source(_require_mapping(raw, "source", "config"))
+    receivers = _parse_receivers(raw.get("receivers"))
     output = _parse_output(_require_mapping(raw, "output", "config"))
 
     return RunConfig(
@@ -132,6 +168,7 @@ def load_config(path: str | Path) -> RunConfig:
         frequencies_hz=frequencies,
         boundary=boundary,
         source=source,
+        receivers=receivers,
         output=output,
         raw=raw,
         config_path=config_path,
@@ -239,30 +276,121 @@ def _parse_source(raw: Mapping[str, Any]) -> SourceConfig:
     )
 
 
+def _parse_boundary(
+    raw: Mapping[str, Any], boundary_type: str
+) -> BoundaryConfig:
+    padding = {
+        name: _optional_nonnegative_int(raw, name, 0, "boundary")
+        for name in (
+            "top_padding_cells",
+            "bottom_padding_cells",
+            "left_padding_cells",
+            "right_padding_cells",
+        )
+    }
+    if boundary_type == "zero_exterior_ghost" and any(padding.values()):
+        raise ConfigError(
+            "boundary.type='zero_exterior_ghost' requires all padding cells to be 0."
+        )
+    if boundary_type == "forward_compatible_padding":
+        invalid_widths = [value for value in padding.values() if value == 1]
+        if invalid_widths:
+            raise ConfigError(
+                "Positive forward-compatible padding widths must be at least 2 "
+                "because the reference damping thickness is (width - 1) * spacing."
+            )
+
+    damping_raw = raw.get("damping", {})
+    if not isinstance(damping_raw, dict):
+        raise ConfigError("boundary.damping must be an object.")
+    profile = damping_raw.get("profile", "quadratic")
+    if profile not in SUPPORTED_DAMPING_PROFILES:
+        raise ConfigError(
+            f"Unsupported boundary.damping.profile {profile!r}; supported values: "
+            f"{sorted(SUPPORTED_DAMPING_PROFILES)}."
+        )
+    velocity_reference = damping_raw.get("velocity_reference", "minimum")
+    if velocity_reference not in SUPPORTED_DAMPING_VELOCITY_REFERENCES:
+        raise ConfigError(
+            "Unsupported boundary.damping.velocity_reference "
+            f"{velocity_reference!r}; supported values: "
+            f"{sorted(SUPPORTED_DAMPING_VELOCITY_REFERENCES)}."
+        )
+    corner_combination = damping_raw.get("corner_combination", "maximum")
+    if corner_combination not in SUPPORTED_DAMPING_CORNER_COMBINATIONS:
+        raise ConfigError(
+            "Unsupported boundary.damping.corner_combination "
+            f"{corner_combination!r}; supported values: "
+            f"{sorted(SUPPORTED_DAMPING_CORNER_COMBINATIONS)}."
+        )
+    target_decay = _optional_positive_float(
+        damping_raw, "target_decay", 1.0e-7, "boundary.damping"
+    )
+    if target_decay >= 1.0:
+        raise ConfigError("boundary.damping.target_decay must be in (0, 1).")
+    damping = DampingProfileConfig(
+        profile=profile,
+        power=_optional_positive_float(
+            damping_raw, "power", 2.0, "boundary.damping"
+        ),
+        target_decay=target_decay,
+        strength_scale=_optional_nonnegative_float(
+            damping_raw, "strength_scale", 1.0, "boundary.damping"
+        ),
+        velocity_reference=velocity_reference,
+        corner_combination=corner_combination,
+    )
+    return BoundaryConfig(type=boundary_type, damping=damping, **padding)
+
+
+def _parse_receivers(raw: Any) -> ReceiverConfig:
+    if raw is None:
+        return ReceiverConfig()
+    if not isinstance(raw, dict):
+        raise ConfigError("config.receivers must be an object.")
+    positions = raw.get("positions", [])
+    if not isinstance(positions, list):
+        raise ConfigError("receivers.positions must be a list.")
+    parsed: list[SourcePositionConfig] = []
+    for index, position in enumerate(positions):
+        if not isinstance(position, dict):
+            raise ConfigError(f"receivers.positions[{index}] must be an object.")
+        parsed.append(
+            _parse_grid_position(position, f"receivers.positions[{index}]")
+        )
+    return ReceiverConfig(positions=tuple(parsed))
+
+
 def _parse_source_position(raw: Mapping[str, Any]) -> SourcePositionConfig:
-    mode = _require_nonempty_str(raw, "mode", "source.position")
+    return _parse_grid_position(raw, "source.position")
+
+
+def _parse_grid_position(
+    raw: Mapping[str, Any], context: str
+) -> SourcePositionConfig:
+    mode = _require_nonempty_str(raw, "mode", context)
     if mode not in SUPPORTED_SOURCE_POSITION_MODES:
         raise ConfigError(
-            f"Unsupported source.position.mode {mode!r}; supported values: "
+            f"Unsupported {context}.mode {mode!r}; supported values: "
             f"{sorted(SUPPORTED_SOURCE_POSITION_MODES)}."
         )
     if mode == "fractional":
         x_fraction = _fraction_value(
-            _require_key(raw, "x_fraction", "source.position"),
-            "source.position.x_fraction",
+            _require_key(raw, "x_fraction", context),
+            f"{context}.x_fraction",
         )
         z_fraction = _fraction_value(
-            _require_key(raw, "z_fraction", "source.position"),
-            "source.position.z_fraction",
+            _require_key(raw, "z_fraction", context),
+            f"{context}.z_fraction",
         )
         return SourcePositionConfig(
             mode=mode, x_fraction=x_fraction, z_fraction=z_fraction
         )
     ix = _nonnegative_int_value(
-        _require_key(raw, "ix", "source.position"), "source.position.ix"
+        _require_key(raw, "ix", context), f"{context}.ix"
     )
     iz = _nonnegative_int_value(
-        _require_key(raw, "iz", "source.position"), "source.position.iz"
+        _require_key(raw, "iz", context), f"{context}.iz"
     )
     return SourcePositionConfig(mode=mode, ix=ix, iz=iz)
 
@@ -347,4 +475,25 @@ def _optional_bool(
     value = raw.get(key, default)
     if not isinstance(value, bool):
         raise ConfigError(f"{context}.{key} must be a boolean.")
+    return value
+
+
+def _optional_nonnegative_int(
+    raw: Mapping[str, Any], key: str, default: int, context: str
+) -> int:
+    return _nonnegative_int_value(raw.get(key, default), f"{context}.{key}")
+
+
+def _optional_positive_float(
+    raw: Mapping[str, Any], key: str, default: float, context: str
+) -> float:
+    return _positive_float_value(raw.get(key, default), f"{context}.{key}")
+
+
+def _optional_nonnegative_float(
+    raw: Mapping[str, Any], key: str, default: float, context: str
+) -> float:
+    value = _finite_float_value(raw.get(key, default), f"{context}.{key}")
+    if value < 0.0:
+        raise ConfigError(f"{context}.{key} must be >= 0.")
     return value

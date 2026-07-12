@@ -93,16 +93,31 @@ def nonzero_row_indices(array: np.ndarray) -> list[int]:
     return np.flatnonzero(np.any(array != 0.0, axis=axes)).astype(int).tolist()
 
 
-def build_expected_k(nx: int, nz: int, dx_m: float, dz_m: float) -> sp.csr_matrix:
+def build_expected_k(
+    nx: int, nz: int, dx_m: float, dz_m: float, spatial_order: int = 2
+) -> sp.csr_matrix:
+    if spatial_order == 2:
+        center, offset_1, offset_2 = -2.0, 1.0, None
+    elif spatial_order == 4:
+        center, offset_1, offset_2 = -2.5, 4.0 / 3.0, -1.0 / 12.0
+    else:
+        raise ValueError(f"Unsupported spatial_order={spatial_order}.")
+    x_diagonals = [np.ones(nx - 1) * offset_1, np.ones(nx) * center, np.ones(nx - 1) * offset_1]
+    z_diagonals = [np.ones(nz - 1) * offset_1, np.ones(nz) * center, np.ones(nz - 1) * offset_1]
+    offsets = [-1, 0, 1]
+    if offset_2 is not None:
+        x_diagonals = [np.ones(nx - 2) * offset_2, *x_diagonals, np.ones(nx - 2) * offset_2]
+        z_diagonals = [np.ones(nz - 2) * offset_2, *z_diagonals, np.ones(nz - 2) * offset_2]
+        offsets = [-2, -1, 0, 1, 2]
     dxx = sp.diags(
-        [np.ones(nx - 1), -2.0 * np.ones(nx), np.ones(nx - 1)],
-        offsets=[-1, 0, 1],
+        x_diagonals,
+        offsets=offsets,
         shape=(nx, nx),
         format="csr",
     ) / (dx_m**2)
     dzz = sp.diags(
-        [np.ones(nz - 1), -2.0 * np.ones(nz), np.ones(nz - 1)],
-        offsets=[-1, 0, 1],
+        z_diagonals,
+        offsets=offsets,
         shape=(nz, nz),
         format="csr",
     ) / (dz_m**2)
@@ -148,7 +163,11 @@ def validate_output_package() -> dict[str, Any]:
     required_root_files = {
         "manifest": OUTPUT_PACKAGE / "manifest.json",
         "resolved_config": OUTPUT_PACKAGE / "config_resolved.json",
-        "velocity": OUTPUT_PACKAGE / "velocity_selected.npy",
+        "velocity": (
+            OUTPUT_PACKAGE / "velocity_padded.npy"
+            if (OUTPUT_PACKAGE / "velocity_padded.npy").is_file()
+            else OUTPUT_PACKAGE / "velocity_selected.npy"
+        ),
         "frequencies": OUTPUT_PACKAGE / "frequencies_hz.npy",
         "omega": OUTPUT_PACKAGE / "omega_rad_s.npy",
         "K": OUTPUT_PACKAGE / "operators" / "K_csr.npz",
@@ -191,10 +210,17 @@ def validate_output_package() -> dict[str, Any]:
     n = int(resolved["N"])
     dx_m = float(resolved["dx_m"])
     dz_m = float(resolved["dz_m"])
+    spatial_order = int(resolved.get("spatial_order", 2))
     source_flat_index = int(resolved["resolved_source_flat_index"])
 
     result["K_symmetry_error"] = max_abs_sparse(K - K.T)
-    expected_K = build_expected_k(nx=nx, nz=nz, dx_m=dx_m, dz_m=dz_m)
+    expected_K = build_expected_k(
+        nx=nx,
+        nz=nz,
+        dx_m=dx_m,
+        dz_m=dz_m,
+        spatial_order=spatial_order,
+    )
     result["K_construction_error"] = max_abs_sparse(K - expected_K)
     expected_M_diag = 1.0 / velocity.ravel(order="C") ** 2
     result["M_diag_formula_error"] = max_abs_array(M_diag - expected_M_diag)

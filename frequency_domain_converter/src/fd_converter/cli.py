@@ -19,14 +19,23 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"run_name: {result.config.run_name}")
     print(f"output_dir: {result.output_dir}")
-    print(f"velocity_shape: {result.velocity_result.velocity.shape}")
+    print(f"physical_velocity_shape: {result.padded_domain.physical_shape}")
+    print(f"padded_velocity_shape: {result.padded_domain.padded_shape}")
     print(f"K_shape: {result.K.shape}")
     print(f"K_nnz: {result.K.nnz}")
     print(
-        "source: "
-        f"iz={result.source.iz}, ix={result.source.ix}, "
-        f"flat_index={result.source.flat_index}"
+        "source_physical: "
+        f"iz={result.source_mapping.physical_iz}, "
+        f"ix={result.source_mapping.physical_ix}, "
+        f"flat_index={result.source_mapping.physical_flat_index}"
     )
+    print(
+        "source_padded: "
+        f"iz={result.source_mapping.padded_iz}, "
+        f"ix={result.source_mapping.padded_ix}, "
+        f"flat_index={result.source_mapping.padded_flat_index}"
+    )
+    print(f"receiver_mappings: {len(result.receiver_mappings)}")
     for system in result.systems:
         print(
             f"frequency={system.frequency_hz:g} Hz "

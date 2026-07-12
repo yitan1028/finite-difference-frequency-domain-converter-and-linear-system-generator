@@ -70,8 +70,8 @@ Version 1 intentionally has a narrow scope. It does not provide:
 
 - time stepping;
 - finite-difference time-domain (FDTD) simulation;
-- PML;
-- an absorbing boundary layer;
+- the final damped or complex frequency-domain boundary operator (the padded
+  geometry and damping profile are exported but not yet inserted into `A_j`);
 - the shifted representation `H = M^{-1/2} K M^{-1/2}`;
 - a quantum solve;
 - a computed solution `U_j`;
@@ -237,27 +237,33 @@ d^2 u / dt^2  ->  -omega^2 U(omega)
 
 This is why the time derivative becomes the algebraic `-omega_j^2` term.
 
-## 7. Spatial discretization
+## 7. Spatial discretization and padded boundary infrastructure
 
-Version 1 uses a 2D, second-order, 5-point finite-difference discretization.
-The one-dimensional second-derivative operators have main diagonal `-2/h^2`
-and off-diagonals `1/h^2`. With C-order flattening:
+The default remains the original 2D, second-order, 5-point discretization.
+`grid.spatial_order: 4` enables the forward-compatible fourth-order stencil
+with one-dimensional coefficients `[-1/12, 4/3, -5/2, 4/3, -1/12] / h^2`.
+With C-order flattening:
 
 ```text
 D_2D = kron(I_z, Dxx) + kron(Dzz, I_x)
 K = -D_2D
 ```
 
-The only supported boundary type is:
+Two boundary modes are available:
 
 ```text
 zero_exterior_ghost
+forward_compatible_padding
 ```
 
-All points in the velocity grid remain unknowns. When the 5-point stencil
-reaches outside the computational grid, the exterior value is treated as zero.
-This is a zero-exterior ghost-value convention, not PML and not an absorbing
-boundary treatment.
+The legacy mode uses no external padding. The forward-compatible mode adds
+configurable padding on all four sides, extends velocity by edge replication,
+shifts source/receiver indices, and exports a quadratic damping profile based
+on the reference `forward.py` construction. The damping profile is diagnostic
+in this stage and is explicitly not applied to `A_j`.
+
+The sparse stencil never wraps periodically. Terms that would fall outside
+the outer padded grid are omitted, equivalent to zero exterior ghost values.
 
 ## 8. Source model
 
@@ -323,13 +329,20 @@ frequency_domain_converter/outputs/first_layered_run/
 
 The `A.mtx` and `K.mtx` files are produced when `output.export_mtx` is true.
 The preview image is produced when `output.save_velocity_preview` is true.
+Every run also exports `velocity_physical.npy`, `velocity_padded.npy`,
+`damping_profile.npy`, physical/padding masks, `grid_index_padded.npy`,
+`boundary_metadata.json`, and `operators/operator_metadata.json`.
 
 | File | Meaning |
 | --- | --- |
 | `manifest.json` | Package-level metadata, equations, dimensions, source details, and file paths. |
 | `config_input.json` | The JSON configuration as supplied to the run. |
 | `config_resolved.json` | Resolved paths, selected velocity shape, source indices, and derived run settings. |
-| `velocity_selected.npy` | The selected `(nz, nx)` `float64` velocity map in m/s. |
+| `velocity_selected.npy` | The selected physical `(nz, nx)` `float64` velocity map in m/s. |
+| `velocity_padded.npy` | The computational velocity grid after edge-replicated external padding. |
+| `damping_profile.npy` | Forward-compatible damping coefficients; not yet applied to `A_j`. |
+| `physical_domain_mask.npy` / `padding_mask.npy` | Boolean masks separating physical and padding cells. |
+| `boundary_metadata.json` | Shapes, slices, padding, damping settings, and source/receiver mappings. |
 | `velocity_preview.png` | Optional image preview of the selected velocity map. |
 | `grid_index.npy` | A `(nz, nx)` map containing the C-order flat index at every grid point. |
 | `frequencies_hz.npy` | Selected frequency array in Hz. |
@@ -552,7 +565,7 @@ The report checks:
 - the source nonzero index;
 - sparse CSR format.
 
-The current reference report records 29 collected tests, 29 passed tests, and
+The current reference report records 42 collected tests, 42 passed tests, and
 final status `PASS`.
 
 ## 15. Current validated example
@@ -612,7 +625,8 @@ implement a quantum algorithm.
 
 Potential future extensions include:
 
-- PML support;
+- insertion of the exported damping profile into the final frequency-domain
+  boundary operator;
 - the shifted `H` representation;
 - multiple sources;
 - receiver extraction;

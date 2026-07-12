@@ -1,0 +1,66 @@
+{
+  "run_name": "demo_padded_4x5",
+  "velocity": {
+    "mode": "inline_layered",
+    "values_m_per_s": [
+      [1500.0, 1520.0, 1540.0, 1560.0, 1580.0],
+      [1800.0, 1820.0, 1840.0, 1860.0, 1880.0],
+      [2200.0, 2220.0, 2240.0, 2260.0, 2280.0],
+      [2600.0, 2620.0, 2640.0, 2660.0, 2680.0]
+    ]
+  },
+  "grid": {
+    "dx_m": 10.0,
+    "dz_m": 10.0,
+    "spatial_order": 4
+  },
+  "frequencies_hz": [
+    12.0
+  ],
+  "boundary": {
+    "type": "forward_compatible_padding",
+    "top_padding_cells": 2,
+    "bottom_padding_cells": 2,
+    "left_padding_cells": 2,
+    "right_padding_cells": 2,
+    "damping": {
+      "profile": "quadratic",
+      "power": 2.0,
+      "target_decay": 1e-7,
+      "strength_scale": 1.0,
+      "velocity_reference": "minimum",
+      "corner_combination": "maximum"
+    }
+  },
+  "source": {
+    "type": "point_ricker_spectrum",
+    "position": {
+      "mode": "grid_index",
+      "ix": 2,
+      "iz": 1
+    },
+    "peak_frequency_hz": 12.0,
+    "strength": 1.0,
+    "phase_mode": "zero"
+  },
+  "receivers": {
+    "positions": [
+      {
+        "mode": "grid_index",
+        "ix": 0,
+        "iz": 1
+      },
+      {
+        "mode": "grid_index",
+        "ix": 4,
+        "iz": 1
+      }
+    ]
+  },
+  "output": {
+    "directory": "outputs/demo_padded_4x5",
+    "export_npz": true,
+    "export_mtx": true,
+    "save_velocity_preview": true
+  }
+}

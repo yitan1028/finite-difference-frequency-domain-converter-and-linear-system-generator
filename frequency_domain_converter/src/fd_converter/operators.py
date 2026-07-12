@@ -4,6 +4,14 @@ import numpy as np
 import scipy.sparse as sp
 
 
+SECOND_ORDER_COEFFICIENTS = {"center": -2.0, "offset_1": 1.0}
+FOURTH_ORDER_COEFFICIENTS = {
+    "center": -2.5,
+    "offset_1": 4.0 / 3.0,
+    "offset_2": -1.0 / 12.0,
+}
+
+
 def grid_index_map(nz: int, nx: int) -> np.ndarray:
     if nz <= 0 or nx <= 0:
         raise ValueError("nz and nx must be positive.")
@@ -27,23 +35,85 @@ def build_1d_second_derivative(n: int, spacing_m: float) -> sp.csr_matrix:
     )
 
 
+def build_1d_fourth_order_second_derivative(
+    n: int, spacing_m: float
+) -> sp.csr_matrix:
+    if n < 3:
+        raise ValueError("Fourth-order derivative operator size must be at least 3.")
+    if spacing_m <= 0.0:
+        raise ValueError("Grid spacing must be > 0.")
+    inv_h2 = 1.0 / (float(spacing_m) ** 2)
+    center = FOURTH_ORDER_COEFFICIENTS["center"]
+    offset_1 = FOURTH_ORDER_COEFFICIENTS["offset_1"]
+    offset_2 = FOURTH_ORDER_COEFFICIENTS["offset_2"]
+    main = np.full(n, center * inv_h2, dtype=np.float64)
+    off_1 = np.full(n - 1, offset_1 * inv_h2, dtype=np.float64)
+    off_2 = np.full(n - 2, offset_2 * inv_h2, dtype=np.float64)
+    return sp.diags(
+        diagonals=[off_2, off_1, main, off_1, off_2],
+        offsets=[-2, -1, 0, 1, 2],
+        shape=(n, n),
+        format="csr",
+        dtype=np.float64,
+    )
+
+
 def build_spatial_operator(
     nz: int,
     nx: int,
     dx_m: float,
     dz_m: float,
     boundary_type: str = "zero_exterior_ghost",
+    spatial_order: int = 2,
 ) -> sp.csr_matrix:
-    if boundary_type != "zero_exterior_ghost":
+    supported_boundaries = {"zero_exterior_ghost", "forward_compatible_padding"}
+    if boundary_type not in supported_boundaries:
         raise ValueError(
-            f"Unsupported boundary_type={boundary_type!r}; expected 'zero_exterior_ghost'."
+            f"Unsupported boundary_type={boundary_type!r}; expected one of "
+            f"{sorted(supported_boundaries)}."
         )
-    dxx = build_1d_second_derivative(nx, dx_m)
-    dzz = build_1d_second_derivative(nz, dz_m)
+    if spatial_order == 2:
+        derivative_builder = build_1d_second_derivative
+    elif spatial_order == 4:
+        derivative_builder = build_1d_fourth_order_second_derivative
+    else:
+        raise ValueError("spatial_order must be 2 or 4.")
+    dxx = derivative_builder(nx, dx_m)
+    dzz = derivative_builder(nz, dz_m)
     ix = sp.eye(nx, format="csr", dtype=np.float64)
     iz = sp.eye(nz, format="csr", dtype=np.float64)
     d2d = sp.kron(iz, dxx, format="csr") + sp.kron(dzz, ix, format="csr")
     return (-d2d).astype(np.float64).tocsr()
+
+
+def spatial_operator_metadata(
+    *, spatial_order: int, dx_m: float, dz_m: float
+) -> dict[str, object]:
+    if spatial_order == 2:
+        coefficients = SECOND_ORDER_COEFFICIENTS
+        stencil = "5-point axis-aligned second-order"
+        offsets = [0, 1]
+    elif spatial_order == 4:
+        coefficients = FOURTH_ORDER_COEFFICIENTS
+        stencil = "9-point axis-aligned fourth-order"
+        offsets = [0, 1, 2]
+    else:
+        raise ValueError("spatial_order must be 2 or 4.")
+    return {
+        "spatial_order": spatial_order,
+        "stencil": stencil,
+        "dimensionless_1d_coefficients": dict(coefficients),
+        "neighbor_offsets_cells": offsets,
+        "dx_m": float(dx_m),
+        "dz_m": float(dz_m),
+        "operator_definition": "K = -(kron(I_z, Dxx) + kron(Dzz, I_x))",
+        "outer_boundary_handling": (
+            "Stencil terms outside the padded grid are omitted, equivalent to "
+            "zero exterior ghost values."
+        ),
+        "periodic_wraparound": False,
+        "damping_applied_to_operator": False,
+    }
 
 
 def build_medium_operator(velocity: np.ndarray) -> np.ndarray:
