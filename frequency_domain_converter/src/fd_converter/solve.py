@@ -477,6 +477,7 @@ def _build_input_snapshot(
         "physical_domain_mask": package_dir / "physical_domain_mask.npy",
         "padding_mask": package_dir / "padding_mask.npy",
         "source_time_signal": package_dir / "source_time_signal.npy",
+        "source_time": package_dir / "source_time.npy",
         "source_metadata": package_dir / "source_metadata.json",
     }
     systems: list[dict[str, Any]] = []

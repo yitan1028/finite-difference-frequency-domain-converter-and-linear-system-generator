@@ -8,6 +8,7 @@ __pycache__/
 htmlcov/
 
 frequency_domain_converter/outputs/
+frequency_domain_converter/tests/pml_reflection/results/
 **/solved_outputs/
 *.npz
 *.mtx

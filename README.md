@@ -130,10 +130,16 @@ source location, and the unknown wavefield vector.
 All normal run parameters live in JSON, not Python source code. Change JSON
 to select a velocity input, grid, frequency set, source, or output path.
 
-The production configuration is
-`frequency_domain_converter/configs/first_layered_run.json`. It expects the
-velocity dataset at `../model2.npy` relative to the
-`frequency_domain_converter/` directory and selects `model_index: 0`.
+The production configurations are:
+
+- `frequency_domain_converter/configs/first_layered_run.json`: unchanged
+  undamped continuous-Helmholtz baseline on the physical 70 x 70 grid;
+- `frequency_domain_converter/configs/first_layered_run_pml20.json`: opt-in
+  forward-discrete complex system with 20 external cells per side, producing
+  a 110 x 110 grid.
+
+Both expect the velocity dataset at `../model2.npy` relative to the
+`frequency_domain_converter/` directory and select `model_index: 0`.
 
 The formal configuration has this structure:
 
@@ -527,19 +533,34 @@ cd frequency_domain_converter
 python -m pytest
 ```
 
-## Forward-discrete damped mode
+## Forward-discrete PML mode
 
-The opt-in matched mode derives its complex matrix directly from the discrete
-recurrence in `forward.py`; it does not replace the default continuous
-Helmholtz formulation. A minimal configuration addition is:
+The opt-in `forward_discrete_pml` mode derives its complex matrix directly
+from the discrete recurrence in `forward.py`; it does not replace the default
+continuous Helmholtz formulation. The production configuration uses:
 
 ```json
 {
   "grid": {"dx_m": 10.0, "dz_m": 10.0, "spatial_order": 4},
   "frequency_operator": {
-    "mode": "forward_discrete_damped",
+    "mode": "forward_discrete_pml",
     "dt_s": 0.001,
     "harmonic_convention": "exp(-i*omega*n*dt)"
+  },
+  "boundary": {
+    "type": "forward_compatible_padding",
+    "top_padding_cells": 20,
+    "bottom_padding_cells": 20,
+    "left_padding_cells": 20,
+    "right_padding_cells": 20,
+    "damping": {
+      "profile": "polynomial",
+      "power": 3.0,
+      "target_decay": 1e-6,
+      "strength_scale": 4.0,
+      "velocity_reference": "maximum",
+      "corner_combination": "sum"
+    }
   },
   "source": {
     "type": "forward_time_ricker_dft",
@@ -549,10 +570,27 @@ Helmholtz formulation. A minimal configuration addition is:
 }
 ```
 
-This mode requires `forward_compatible_padding`, equal `dx_m` and `dz_m`, and
-the fourth-order stencil. It exports complex matrices/RHS arrays, the finite
-reference Ricker sequence, its raw positive-sign DFT coefficients, matrix
-real/imaginary diagnostics, and complete transform metadata. See
+This mode requires equal `dx_m` and `dz_m` and the fourth-order stencil. It
+exports complex matrices/RHS arrays, the finite reference Ricker sequence,
+its raw positive-sign DFT coefficients, matrix real/imaginary diagnostics,
+and complete transform metadata. Run and solve it from the repository root:
+
+```bash
+PYTHONPATH=frequency_domain_converter/src python -m fd_converter.cli --config frequency_domain_converter/configs/first_layered_run_pml20.json
+PYTHONPATH=frequency_domain_converter/src python -m fd_converter.solve_cli --input frequency_domain_converter/outputs/first_layered_run_pml20
+```
+
+Run the real-model reflection validation from the converter directory:
+
+```bash
+cd frequency_domain_converter
+python tests/pml_reflection/run_reflection_validation.py --mode final
+```
+
+The current 20-cell scalar damping result solves accurately but does not meet
+all reflection targets against the 60-cell practical reference, especially at
+5 and 10 Hz. Do not interpret the small linear-solver residual as proof of
+absorbing-boundary accuracy. See the generated PML20 summary and
 `frequency_domain_converter/docs/forward_compatible_frequency_operator.md`
 for the recurrence and exact derivation.
 

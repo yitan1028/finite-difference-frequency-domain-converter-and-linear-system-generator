@@ -37,6 +37,7 @@ class PaddedDomain:
     physical_z_slice: slice
     physical_x_slice: slice
     damping_side_maxima: dict[str, float]
+    damping_design: dict[str, object]
     damping_compatibility_audit: dict[str, object]
 
     @property
@@ -81,7 +82,7 @@ def build_padded_domain(
     physical_mask[z_slice, x_slice] = True
     padding_mask = ~physical_mask
 
-    damping, side_maxima = build_damping_profile(
+    damping, side_maxima, damping_design = build_damping_profile(
         physical,
         padded.shape,
         widths,
@@ -107,6 +108,7 @@ def build_padded_domain(
         physical_z_slice=z_slice,
         physical_x_slice=x_slice,
         damping_side_maxima=side_maxima,
+        damping_design=damping_design,
         damping_compatibility_audit=compatibility_audit,
     )
 
@@ -119,10 +121,11 @@ def build_damping_profile(
     dx_m: float,
     dz_m: float,
     boundary: BoundaryConfig,
-) -> tuple[np.ndarray, dict[str, float]]:
-    """Build the forward-compatible quadratic sponge without applying it."""
-    damping = np.zeros(padded_shape, dtype=np.float64)
-    velocity_reference = float(np.min(velocity_physical))
+) -> tuple[np.ndarray, dict[str, float], dict[str, object]]:
+    """Build the configured scalar damping profile on the padded grid."""
+    velocity_reference = _resolve_velocity_reference(
+        velocity_physical, boundary.damping.velocity_reference
+    )
     side_maxima: dict[str, float] = {}
 
     top = _side_profile(
@@ -138,27 +141,64 @@ def build_damping_profile(
         widths.right, dx_m, velocity_reference, boundary, outer_first=False
     )
 
+    z_damping = np.zeros(padded_shape[0], dtype=np.float64)
+    x_damping = np.zeros(padded_shape[1], dtype=np.float64)
     if widths.top:
-        damping[: widths.top, :] = top[:, None]
+        z_damping[: widths.top] = top
         side_maxima["top"] = float(np.max(top))
     else:
         side_maxima["top"] = 0.0
     if widths.bottom:
-        damping[-widths.bottom :, :] = bottom[:, None]
+        z_damping[-widths.bottom :] = bottom
         side_maxima["bottom"] = float(np.max(bottom))
     else:
         side_maxima["bottom"] = 0.0
     if widths.left:
-        damping[:, : widths.left] = left[None, :]
+        x_damping[: widths.left] = left
         side_maxima["left"] = float(np.max(left))
     else:
         side_maxima["left"] = 0.0
     if widths.right:
-        damping[:, -widths.right :] = right[None, :]
+        x_damping[-widths.right :] = right
         side_maxima["right"] = float(np.max(right))
     else:
         side_maxima["right"] = 0.0
-    return damping, side_maxima
+    if boundary.damping.corner_combination == "forward_x_overwrite":
+        damping = np.repeat(z_damping[:, None], padded_shape[1], axis=1)
+        if widths.left:
+            damping[:, : widths.left] = left[None, :]
+        if widths.right:
+            damping[:, -widths.right :] = right[None, :]
+    elif boundary.damping.corner_combination == "sum":
+        damping = z_damping[:, None] + x_damping[None, :]
+    elif boundary.damping.corner_combination == "maximum":
+        damping = np.maximum(z_damping[:, None], x_damping[None, :])
+    else:  # Validated by config; retained for direct dataclass callers.
+        raise ValueError(
+            "Unsupported damping corner combination: "
+            f"{boundary.damping.corner_combination!r}."
+        )
+
+    damping_design = {
+        "profile": boundary.damping.profile,
+        "power": float(boundary.damping.power),
+        "target_decay": float(boundary.damping.target_decay),
+        "strength_scale": float(boundary.damping.strength_scale),
+        "velocity_reference_rule": boundary.damping.velocity_reference,
+        "velocity_reference_value_m_per_s": velocity_reference,
+        "corner_combination": boundary.damping.corner_combination,
+        "sides": {
+            "top": _side_design(widths.top, dz_m, velocity_reference, boundary),
+            "bottom": _side_design(
+                widths.bottom, dz_m, velocity_reference, boundary
+            ),
+            "left": _side_design(widths.left, dx_m, velocity_reference, boundary),
+            "right": _side_design(
+                widths.right, dx_m, velocity_reference, boundary
+            ),
+        },
+    }
+    return damping, side_maxima, damping_design
 
 
 def build_forward_reference_damping(
@@ -388,18 +428,58 @@ def _side_profile(
         return np.empty(0, dtype=np.float64)
     if width < 2:
         raise ValueError("Positive damping widths must be at least 2.")
-    thickness_m = (width - 1) * float(spacing_m)
-    maximum = (
-        3.0
-        * velocity_reference
-        * np.log(1.0 / boundary.damping.target_decay)
-        / (2.0 * thickness_m)
-        * boundary.damping.strength_scale
-    )
-    distance = np.arange(width, dtype=np.float64) * float(spacing_m)
-    normalized = distance / thickness_m
+    design = _side_design(width, spacing_m, velocity_reference, boundary)
+    maximum = float(design["effective_sigma_max_per_s"])
+    normalized = np.linspace(0.0, 1.0, width, dtype=np.float64)
     values = maximum * normalized ** boundary.damping.power
     return values[::-1] if outer_first else values
+
+
+def _side_design(
+    width: int,
+    spacing_m: float,
+    velocity_reference: float,
+    boundary: BoundaryConfig,
+) -> dict[str, float | int]:
+    if width == 0:
+        return {
+            "padding_cells": 0,
+            "physical_width_m": 0.0,
+            "base_sigma_max_per_s": 0.0,
+            "effective_sigma_max_per_s": 0.0,
+        }
+    if boundary.damping.profile == "quadratic":
+        physical_width_m = (width - 1) * float(spacing_m)
+        coefficient = 3.0
+    elif boundary.damping.profile == "polynomial":
+        physical_width_m = width * float(spacing_m)
+        coefficient = float(boundary.damping.power) + 1.0
+    else:
+        raise ValueError(f"Unsupported damping profile: {boundary.damping.profile!r}.")
+    base_sigma_max = (
+        coefficient
+        * velocity_reference
+        * np.log(1.0 / boundary.damping.target_decay)
+        / (2.0 * physical_width_m)
+    )
+    return {
+        "padding_cells": int(width),
+        "physical_width_m": float(physical_width_m),
+        "base_sigma_max_per_s": float(base_sigma_max),
+        "effective_sigma_max_per_s": float(
+            base_sigma_max * boundary.damping.strength_scale
+        ),
+    }
+
+
+def _resolve_velocity_reference(
+    velocity_physical: np.ndarray, rule: str
+) -> float:
+    if rule == "minimum":
+        return float(np.min(velocity_physical))
+    if rule == "maximum":
+        return float(np.max(velocity_physical))
+    raise ValueError(f"Unsupported damping velocity reference: {rule!r}.")
 
 
 def _validate_grid_index(

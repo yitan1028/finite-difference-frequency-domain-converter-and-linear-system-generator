@@ -60,6 +60,7 @@ def export_conversion(result: Any) -> None:
     np.save(output_dir / "source_spectrum.npy", result.source_spectrum)
     if result.source_time_signal is not None:
         np.save(output_dir / "source_time_signal.npy", result.source_time_signal)
+        np.save(output_dir / "source_time.npy", result.source_time_signal)
     write_json(output_dir / "source_metadata.json", build_source_metadata(result))
 
     if result.config.output.save_velocity_preview:
@@ -216,6 +217,7 @@ def build_manifest(result: Any) -> dict[str, Any]:
         "omega_rad_s": "omega_rad_s.npy",
         "source_spectrum": "source_spectrum.npy",
         "source_time_signal": "source_time_signal.npy",
+        "source_time": "source_time.npy",
         "source_metadata": "source_metadata.json",
         "operators": {
             "K_csr": "operators/K_csr.npz",
@@ -405,6 +407,9 @@ def build_source_metadata(result: Any) -> dict[str, Any]:
         "source_time_signal_file": (
             "source_time_signal.npy" if result.source_time_signal is not None else None
         ),
+        "source_time_file": (
+            "source_time.npy" if result.source_time_signal is not None else None
+        ),
         "source_time_signal_shape": (
             list(result.source_time_signal.shape)
             if result.source_time_signal is not None
@@ -466,10 +471,11 @@ def build_boundary_metadata(result: Any) -> dict[str, Any]:
             "target_decay": damping.target_decay,
             "strength_scale": damping.strength_scale,
             "velocity_reference": damping.velocity_reference,
-            "velocity_reference_value_m_per_s": float(
-                np.min(domain.velocity_physical)
-            ),
+            "velocity_reference_value_m_per_s": domain.damping_design[
+                "velocity_reference_value_m_per_s"
+            ],
             "corner_combination": damping.corner_combination,
+            "design": domain.damping_design,
             "side_maxima_per_s": domain.damping_side_maxima,
             "minimum_per_s": float(np.min(domain.damping_profile)),
             "maximum_per_s": float(np.max(domain.damping_profile)),
@@ -520,7 +526,7 @@ def save_velocity_preview(path: Path, velocity: np.ndarray) -> None:
 def save_damping_preview(path: Path, damping: np.ndarray) -> None:
     fig, ax = plt.subplots(figsize=(6, 4.8), constrained_layout=True)
     image = ax.imshow(damping, origin="upper", cmap="magma", aspect="auto")
-    ax.set_title("Forward-compatible damping profile (not applied to A)")
+    ax.set_title("Forward-compatible damping profile")
     ax.set_xlabel("ix")
     ax.set_ylabel("iz")
     cbar = fig.colorbar(image, ax=ax)
@@ -574,7 +580,10 @@ def _jsonable(value: Any) -> Any:
 
 
 def _uses_damped_operator(result: Any) -> bool:
-    return result.config.frequency_operator.mode == "forward_discrete_damped"
+    return result.config.frequency_operator.mode in {
+        "forward_discrete_damped",
+        "forward_discrete_pml",
+    }
 
 
 def _operator_definition(result: Any) -> str:

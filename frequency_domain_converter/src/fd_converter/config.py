@@ -12,10 +12,16 @@ SUPPORTED_SPATIAL_ORDERS = {2, 4}
 SUPPORTED_FREQUENCY_OPERATOR_MODES = {
     "continuous_helmholtz",
     "forward_discrete_damped",
+    "forward_discrete_pml",
 }
-SUPPORTED_DAMPING_PROFILES = {"quadratic"}
-SUPPORTED_DAMPING_VELOCITY_REFERENCES = {"minimum"}
-SUPPORTED_DAMPING_CORNER_COMBINATIONS = {"forward_x_overwrite"}
+FORWARD_DISCRETE_MODES = {"forward_discrete_damped", "forward_discrete_pml"}
+SUPPORTED_DAMPING_PROFILES = {"quadratic", "polynomial"}
+SUPPORTED_DAMPING_VELOCITY_REFERENCES = {"minimum", "maximum"}
+SUPPORTED_DAMPING_CORNER_COMBINATIONS = {
+    "forward_x_overwrite",
+    "maximum",
+    "sum",
+}
 SUPPORTED_SOURCE_TYPES = {"point_ricker_spectrum", "forward_time_ricker_dft"}
 SUPPORTED_SOURCE_POSITION_MODES = {"fractional", "grid_index"}
 SUPPORTED_SOURCE_PHASE_MODES = {"zero", "forward_time_indexed"}
@@ -340,9 +346,9 @@ def _parse_frequency_operator(raw: Any) -> FrequencyOperatorConfig:
             "frequency_operator.harmonic_convention must be "
             "'exp(-i*omega*n*dt)'."
         )
-    if mode == "forward_discrete_damped" and dt_s is None:
+    if mode in FORWARD_DISCRETE_MODES and dt_s is None:
         raise ConfigError(
-            "frequency_operator.mode='forward_discrete_damped' requires dt_s."
+            f"frequency_operator.mode={mode!r} requires dt_s."
         )
     return FrequencyOperatorConfig(
         mode=mode, dt_s=dt_s, harmonic_convention=convention
@@ -356,27 +362,31 @@ def _validate_forward_discrete_contract(
     frequency_operator: FrequencyOperatorConfig,
     source: SourceConfig,
 ) -> None:
-    if frequency_operator.mode != "forward_discrete_damped":
+    if frequency_operator.mode not in FORWARD_DISCRETE_MODES:
         if source.type == "forward_time_ricker_dft":
             raise ConfigError(
                 "forward_time_ricker_dft requires "
-                "frequency_operator.mode='forward_discrete_damped'."
+                "a forward-discrete frequency operator mode."
             )
         return
     if boundary.type != "forward_compatible_padding":
         raise ConfigError(
-            "forward_discrete_damped requires "
+            "Forward-discrete frequency operators require "
             "boundary.type='forward_compatible_padding'."
         )
     if grid.spatial_order != 4:
-        raise ConfigError("forward_discrete_damped requires grid.spatial_order=4.")
+        raise ConfigError(
+            "Forward-discrete frequency operators require grid.spatial_order=4."
+        )
     if not math.isclose(grid.dx_m, grid.dz_m, rel_tol=0.0, abs_tol=1.0e-12):
         raise ConfigError(
-            "forward_discrete_damped requires dx_m == dz_m to match forward.py."
+            "Forward-discrete frequency operators require dx_m == dz_m to "
+            "match forward.py."
         )
     if source.type != "forward_time_ricker_dft":
         raise ConfigError(
-            "forward_discrete_damped requires source.type='forward_time_ricker_dft'."
+            "Forward-discrete frequency operators require "
+            "source.type='forward_time_ricker_dft'."
         )
 
 

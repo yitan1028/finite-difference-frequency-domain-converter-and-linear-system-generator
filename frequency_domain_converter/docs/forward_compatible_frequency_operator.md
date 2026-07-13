@@ -2,8 +2,9 @@
 
 ## Scope
 
-This document derives the opt-in `forward_discrete_damped` operator directly
-from the recurrence in the supplied `forward.py`. It is not a
+This document derives the opt-in `forward_discrete_damped` operator and its
+production alias `forward_discrete_pml` directly from the recurrence in the
+supplied `forward.py`. It is not a
 coordinate-stretched PML derivation. The implementation uses the same padded
 velocity, fourth-order coefficients, damping array, time step, and source
 sequence as the corrected forward-compatible model.
@@ -152,3 +153,25 @@ saved damping array with an independent NumPy transcription of `get_Abc`.
 Raw `torch.roll` wrap-around is not part of the matched model. Both the new
 frequency operator and the future time-domain comparison solver must use the
 corrected zero-exterior outer edge and the same saved damping array.
+
+## Production polynomial profile
+
+The production PML20 configuration retains the scalar damping recurrence
+above but uses a configurable polynomial profile on each side:
+
+```text
+sigma(d) = strength_scale * sigma_max * (d / L)^power
+
+sigma_max = (power + 1) * v_ref * log(1 / R) / (2 L)
+L = padding_cells * spacing
+```
+
+The physical-domain value and the first profile endpoint are zero. The outer
+profile endpoint reaches the effective `sigma_max`. The production rule uses
+the maximum selected-model velocity and adds the x and z profiles in corners.
+The prior quadratic, minimum-velocity, x-overwrite profile remains available
+for exact `forward.py:get_Abc` compatibility.
+
+This remains a recurrence-compatible scalar sponge, not a coordinate-stretched
+PML. Reflection error must therefore be measured against a thick-domain
+reference; a small algebraic residual only verifies the sparse solve.
