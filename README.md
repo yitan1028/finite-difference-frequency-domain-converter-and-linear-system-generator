@@ -9,21 +9,17 @@ it is not a quantum solver.
 
 ```text
 README.md
-examples/
-  demo_3x3_layered.py
-  output/                         generated and ignored
 frequency_domain_converter/
   src/fd_converter/               converter package code
-  configs/                        formal and demo JSON configurations
-  tests/                          unit tests and report script
+  configs/                        production JSON configurations
+  tests/                          production integration tests
   outputs/                        formal generated output packages
 ```
 
 This root README is the main GitHub entry point. Commands below are written
 for the repository root unless a command explicitly changes directory. The
 formal converter package, its configurations, tests, and formal output remain
-inside `frequency_domain_converter/`. The root-level teaching example writes
-its generated figures and package to `examples/output/demo_3x3/`.
+inside `frequency_domain_converter/`.
 
 ## 1. Goal
 
@@ -82,7 +78,7 @@ Version 1 intentionally has a narrow scope. It does not provide:
 
 Every run is controlled by one JSON configuration. It provides:
 
-- a velocity file, or a small inline velocity map for the teaching demo;
+- a velocity file;
 - `model_index` when the file contains multiple models;
 - `dx_m` and `dz_m` grid spacings in metres;
 - `frequencies_hz` as a non-empty list of positive frequencies;
@@ -134,15 +130,10 @@ source location, and the unknown wavefield vector.
 All normal run parameters live in JSON, not Python source code. Change JSON
 to select a velocity input, grid, frequency set, source, or output path.
 
-The repository includes two configurations:
-
-- `frequency_domain_converter/configs/first_layered_run.json`: formal
-  file-based conversion. It expects
-  the velocity dataset at `../model2.npy` relative to the
-  `frequency_domain_converter/` directory and selects `model_index: 0`.
-- `frequency_domain_converter/configs/demo_3x3.json`: a small inline `3 x 3`
-  layered map for the teaching demo. It uses the same core converter, then
-  the root-level demo script creates figures.
+The production configuration is
+`frequency_domain_converter/configs/first_layered_run.json`. It expects the
+velocity dataset at `../model2.npy` relative to the
+`frequency_domain_converter/` directory and selects `model_index: 0`.
 
 The formal configuration has this structure:
 
@@ -395,16 +386,6 @@ supported:
 PYTHONPATH=frequency_domain_converter/src python -m fd_converter.cli --config frequency_domain_converter/configs/first_layered_run.json
 ```
 
-Run the 3x3 teaching example:
-
-```bash
-python examples/demo_3x3_layered.py --config frequency_domain_converter/configs/demo_3x3.json
-```
-
-The demo calls the same conversion logic, then writes explanatory PNG figures
-to `examples/output/demo_3x3/`. It is useful for inspecting a small system
-but is not the formal production workflow.
-
 ## 11. How to inspect `.npy` files
 
 `.npy` is NumPy's binary array format, not a text file. Load it with NumPy:
@@ -455,7 +436,7 @@ print(A.nnz)
 print(A.dtype)
 ```
 
-Do not call `A.toarray()` for large systems except for tiny teaching examples.
+Do not call `A.toarray()` for large systems.
 For a safe local inspection, convert only a small slice:
 
 ```python
@@ -501,9 +482,9 @@ print(max_A_error)
 print(max_Q_error)
 ```
 
-Both values should be zero or near floating-point precision. The packaged
-test report also reconstructs the 5-point `K`, checks `M_diag = 1 / v^2`,
-checks sparse CSR format, and validates all exported frequencies.
+Both values should be zero or near floating-point precision. The integration
+tests check `M_diag = 1 / v^2`, sparse CSR format, and every configured
+frequency using the production 70 x 70 workflow.
 
 ## Solving generated systems
 
@@ -531,42 +512,20 @@ finite solution and relative residual at most `1e-9`.
 This is not the quantum solver. It is a classical reference result that the
 quantum team can use for interface validation and solution comparison.
 
-## 14. Testing and reports
+## 14. Testing
 
-The `tests/` directory contains unit tests for configuration validation,
-velocity loading, flattening, sparse operators, source construction, system
-assembly, export/readback behavior, and the classical sparse solver.
+The `frequency_domain_converter/tests/` directory contains two
+production-scale integration tests. They use `configs/first_layered_run.json`
+and the actual 70 x 70 velocity workflow to validate matrix/RHS assembly at
+every configured frequency and classical solution residuals. Any generated
+test data is written only to pytest's temporary directory.
 
-Run all tests and generate human-readable and machine-readable reports:
+Run the tests from the converter directory with plain pytest:
 
 ```bash
-python frequency_domain_converter/tests/run_tests_with_report.py
+cd frequency_domain_converter
+python -m pytest
 ```
-
-The script writes:
-
-```text
-frequency_domain_converter/tests/test_results/pytest_output.txt
-frequency_domain_converter/tests/test_results/test_report.txt
-frequency_domain_converter/tests/test_results/test_report.json
-```
-
-The report checks:
-
-- pytest status;
-- input/output specification metadata;
-- `K` shape and nonzero count;
-- `M_diag` shape;
-- `K` symmetry;
-- the 5-point construction of `K`;
-- the `M_diag` formula;
-- the `A_j` formula at every exported frequency;
-- the RHS formula;
-- the source nonzero index;
-- sparse CSR format.
-
-The current reference report records 50 collected tests, 50 passed tests, and
-final status `PASS`.
 
 ## Forward-discrete damped mode
 
@@ -615,8 +574,8 @@ A_j nnz: 24220
 all formula checks: PASS
 ```
 
-The current test report records zero reconstruction error for `K`, `M_diag`,
-every `A_j`, and every `Q_j` in this package.
+The production integration tests validate `M_diag`, every `A_j`, every `Q_j`,
+and the classical solve residuals for these frequencies.
 
 ## 16. For quantum solver users
 
