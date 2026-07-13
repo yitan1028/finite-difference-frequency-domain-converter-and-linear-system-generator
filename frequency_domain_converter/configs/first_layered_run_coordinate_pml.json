@@ -1,0 +1,69 @@
+{
+  "run_name": "first_layered_run_coordinate_pml",
+  "input": {
+    "velocity_file": "../model2.npy",
+    "model_index": 0
+  },
+  "grid": {
+    "dx_m": 10.0,
+    "dz_m": 10.0,
+    "spatial_order": 2
+  },
+  "frequency_operator": {
+    "mode": "coordinate_stretched_pml",
+    "dt_s": 0.001,
+    "harmonic_convention": "exp(-i*omega*t)",
+    "spatial_discretization": "conservative_flux_second_order"
+  },
+  "frequencies_hz": [
+    5.0,
+    10.0,
+    15.0,
+    20.0
+  ],
+  "boundary": {
+    "type": "forward_compatible_padding",
+    "top_padding_cells": 30,
+    "bottom_padding_cells": 30,
+    "left_padding_cells": 30,
+    "right_padding_cells": 30,
+    "damping": {
+      "profile": "polynomial",
+      "power": 3.0,
+      "target_decay": 1e-6,
+      "strength_scale": 1.0,
+      "velocity_reference": "maximum",
+      "corner_combination": "maximum"
+    }
+  },
+  "source": {
+    "type": "forward_time_ricker_dft",
+    "position": {
+      "mode": "fractional",
+      "x_fraction": 0.5,
+      "z_fraction": 0.1
+    },
+    "peak_frequency_hz": 18.0,
+    "strength": 1.0,
+    "phase_mode": "forward_time_indexed",
+    "time_steps": 600
+  },
+  "receivers": {
+    "positions": [
+      {"mode": "grid_index", "ix": 0, "iz": 1},
+      {"mode": "grid_index", "ix": 10, "iz": 1},
+      {"mode": "grid_index", "ix": 20, "iz": 1},
+      {"mode": "grid_index", "ix": 30, "iz": 1},
+      {"mode": "grid_index", "ix": 40, "iz": 1},
+      {"mode": "grid_index", "ix": 50, "iz": 1},
+      {"mode": "grid_index", "ix": 60, "iz": 1},
+      {"mode": "grid_index", "ix": 69, "iz": 1}
+    ]
+  },
+  "output": {
+    "directory": "outputs/first_layered_run_coordinate_pml",
+    "export_npz": true,
+    "export_mtx": false,
+    "save_velocity_preview": true
+  }
+}

@@ -21,8 +21,10 @@ from .config import (
     resolve_output_dir,
 )
 from .operators import (
+    assemble_coordinate_stretched_pml_matrix,
     assemble_frequency_matrix,
     assemble_forward_discrete_damped_matrix,
+    build_conservative_gradient_operators,
     build_medium_operator,
     build_spatial_operator,
 )
@@ -54,6 +56,7 @@ class FrequencySystem:
     directory_name: str
     symmetry: dict
     temporal_symbol: np.ndarray | None = None
+    operator_metadata: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -87,6 +90,7 @@ def package_system(
     Q: np.ndarray,
     symmetry: dict,
     temporal_symbol: np.ndarray | None = None,
+    operator_metadata: dict[str, object] | None = None,
 ) -> FrequencySystem:
     return FrequencySystem(
         frequency_hz=float(frequency_hz),
@@ -98,6 +102,7 @@ def package_system(
         directory_name=frequency_directory_name(float(frequency_hz)),
         symmetry=symmetry,
         temporal_symbol=temporal_symbol,
+        operator_metadata=operator_metadata,
     )
 
 
@@ -194,6 +199,73 @@ def assemble_forward_discrete_systems(
     )
 
 
+def assemble_coordinate_stretched_pml_systems(
+    velocity: np.ndarray,
+    sigma_x: np.ndarray,
+    sigma_z: np.ndarray,
+    frequencies_hz: np.ndarray,
+    source_flat_index: int,
+    source_peak_frequency_hz: float,
+    source_strength: float,
+    dt_s: float,
+    time_steps: int,
+    dx_m: float,
+    dz_m: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[FrequencySystem]]:
+    """Assemble coordinate-stretched systems with a baseline-comparable source."""
+    source_time_signal = forward_ricker_time_signal(
+        source_peak_frequency_hz,
+        dt_s,
+        time_steps,
+        source_strength,
+    )
+    source_spectrum = forward_ricker_dft(
+        frequencies_hz, source_time_signal, dt_s
+    )
+    n = int(velocity.size)
+    if sigma_x.ravel(order="C")[source_flat_index] != 0.0:
+        raise ValueError("Source must be outside the x-directed PML profile.")
+    if sigma_z.ravel(order="C")[source_flat_index] != 0.0:
+        raise ValueError("Source must be outside the z-directed PML profile.")
+    gradients = build_conservative_gradient_operators(
+        velocity.shape[0], velocity.shape[1], dx_m, dz_m
+    )
+    omega_values: list[float] = []
+    systems: list[FrequencySystem] = []
+    for frequency_hz, source_amplitude in zip(frequencies_hz, source_spectrum):
+        A, omega, pml_metadata = assemble_coordinate_stretched_pml_matrix(
+            velocity,
+            sigma_x,
+            sigma_z,
+            float(frequency_hz),
+            dx_m,
+            dz_m,
+            gradients=gradients,
+        )
+        B = build_source_matrix(n, source_flat_index, complex(source_amplitude))
+        Q = B.copy()
+        validate_frequency_system(A, B, Q, n)
+        systems.append(
+            package_system(
+                frequency_hz=float(frequency_hz),
+                omega_rad_s=omega,
+                source_amplitude=complex(source_amplitude),
+                A=A,
+                B=B,
+                Q=Q,
+                symmetry=sparse_symmetry_diagnostic(A),
+                operator_metadata=pml_metadata,
+            )
+        )
+        omega_values.append(omega)
+    return (
+        source_time_signal,
+        source_spectrum,
+        np.asarray(omega_values, dtype=np.float64),
+        systems,
+    )
+
+
 def run_conversion(
     config_path: str | Path, project_root: Optional[Path] = None
 ) -> ConversionResult:
@@ -266,7 +338,10 @@ def run_conversion(
             "mode": "analytic_zero_phase_ricker_spectrum",
             "phase_mode": "zero",
         }
-    else:
+    elif config.frequency_operator.mode in {
+        "forward_discrete_damped",
+        "forward_discrete_pml",
+    }:
         assert config.frequency_operator.dt_s is not None
         assert config.source.time_steps is not None
         (
@@ -295,6 +370,41 @@ def run_conversion(
             "reference_injection": "(v * dt)^2 * source_time[n] at padded source",
             "solver_rhs_after_row_scaling": "Q_j = S_j * e_p",
         }
+    elif config.frequency_operator.mode == "coordinate_stretched_pml":
+        assert config.frequency_operator.dt_s is not None
+        assert config.source.time_steps is not None
+        (
+            source_time_signal,
+            source_spectrum,
+            omega_rad_s,
+            systems,
+        ) = assemble_coordinate_stretched_pml_systems(
+            velocity=velocity,
+            sigma_x=padded_domain.sigma_x,
+            sigma_z=padded_domain.sigma_z,
+            frequencies_hz=frequencies_hz,
+            source_flat_index=source_mapping.padded_flat_index,
+            source_peak_frequency_hz=config.source.peak_frequency_hz,
+            source_strength=config.source.strength,
+            dt_s=config.frequency_operator.dt_s,
+            time_steps=config.source.time_steps,
+            dx_m=config.grid.dx_m,
+            dz_m=config.grid.dz_m,
+        )
+        source_transform_metadata = {
+            "mode": "forward_time_ricker_raw_dft",
+            "harmonic_convention": config.frequency_operator.harmonic_convention,
+            "analysis_kernel": "exp(+i*omega*n*dt)",
+            "normalization": "raw unnormalized discrete sum",
+            "dt_s": config.frequency_operator.dt_s,
+            "time_steps": config.source.time_steps,
+            "solver_rhs": "Q_j = S_j * e_p",
+            "pml_source_rescaling": "none; s_x = s_z = 1 at source",
+        }
+    else:  # Configuration validation should make this unreachable.
+        raise ValueError(
+            f"Unsupported frequency operator mode: {config.frequency_operator.mode!r}."
+        )
 
     result = ConversionResult(
         config=config,

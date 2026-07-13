@@ -40,6 +40,11 @@ def export_conversion(result: Any) -> None:
     manifest = build_manifest(result)
     write_json(output_dir / "manifest.json", manifest)
     write_json(output_dir / "boundary_metadata.json", build_boundary_metadata(result))
+    if result.config.frequency_operator.mode == "coordinate_stretched_pml":
+        write_json(
+            output_dir / "coordinate_pml_metadata.json",
+            build_coordinate_pml_metadata(result),
+        )
     write_json(
         output_dir / "damping_compatibility.json",
         result.padded_domain.damping_compatibility_audit,
@@ -50,9 +55,14 @@ def export_conversion(result: Any) -> None:
     np.save(output_dir / "velocity_selected.npy", physical)
     np.save(output_dir / "velocity_physical.npy", physical)
     np.save(output_dir / "velocity_padded.npy", padded)
-    np.save(output_dir / "physical_domain_mask.npy", result.padded_domain.physical_domain_mask)
+    np.save(
+        output_dir / "physical_domain_mask.npy",
+        result.padded_domain.physical_domain_mask,
+    )
     np.save(output_dir / "padding_mask.npy", result.padded_domain.padding_mask)
     np.save(output_dir / "damping_profile.npy", result.padded_domain.damping_profile)
+    np.save(output_dir / "sigma_x.npy", result.padded_domain.sigma_x)
+    np.save(output_dir / "sigma_z.npy", result.padded_domain.sigma_z)
     np.save(output_dir / "grid_index.npy", grid_index_map(*physical.shape))
     np.save(output_dir / "grid_index_padded.npy", grid_index_map(*padded.shape))
     np.save(output_dir / "frequencies_hz.npy", result.frequencies_hz)
@@ -72,6 +82,13 @@ def export_conversion(result: Any) -> None:
             output_dir / "damping_profile_preview.png",
             result.padded_domain.damping_profile,
         )
+        if result.config.frequency_operator.mode == "coordinate_stretched_pml":
+            save_damping_preview(
+                output_dir / "sigma_x_preview.png", result.padded_domain.sigma_x
+            )
+            save_damping_preview(
+                output_dir / "sigma_z_preview.png", result.padded_domain.sigma_z
+            )
 
     if result.config.output.export_npz:
         save_sparse_npz(operators_dir / "K_csr.npz", result.K)
@@ -181,6 +198,9 @@ def build_resolved_config(result: Any) -> dict[str, Any]:
         "frequency_operator_mode": result.config.frequency_operator.mode,
         "frequency_operator_dt_s": result.config.frequency_operator.dt_s,
         "harmonic_convention": result.config.frequency_operator.harmonic_convention,
+        "frequency_operator_spatial_discretization": (
+            result.config.frequency_operator.spatial_discretization
+        ),
         "source_time_steps": result.config.source.time_steps,
         "source_transform": result.source_transform_metadata,
         "damping_applied_to_frequency_matrix": _uses_damped_operator(result),
@@ -196,6 +216,11 @@ def build_manifest(result: Any) -> dict[str, Any]:
         dx_m=result.config.grid.dx_m,
         dz_m=result.config.grid.dz_m,
     )
+    if result.config.frequency_operator.mode == "coordinate_stretched_pml":
+        operator_info = {
+            "stencil": "conservative variable-coefficient face flux",
+            "dimensionless_1d_coefficients": {},
+        }
     output_paths = {
         "manifest": "manifest.json",
         "config_input": "config_input.json",
@@ -209,6 +234,8 @@ def build_manifest(result: Any) -> dict[str, Any]:
         "velocity_padded_preview": "velocity_padded_preview.png",
         "damping_profile": "damping_profile.npy",
         "damping_profile_preview": "damping_profile_preview.png",
+        "sigma_x": "sigma_x.npy",
+        "sigma_z": "sigma_z.npy",
         "physical_domain_mask": "physical_domain_mask.npy",
         "padding_mask": "padding_mask.npy",
         "grid_index": "grid_index.npy",
@@ -245,6 +272,10 @@ def build_manifest(result: Any) -> dict[str, Any]:
             for system in result.systems
         },
     }
+    if result.config.frequency_operator.mode == "coordinate_stretched_pml":
+        output_paths["coordinate_pml_metadata"] = "coordinate_pml_metadata.json"
+        output_paths["sigma_x_preview"] = "sigma_x_preview.png"
+        output_paths["sigma_z_preview"] = "sigma_z_preview.png"
     return {
         "schema_version": "1.0",
         "run_name": result.config.run_name,
@@ -254,6 +285,9 @@ def build_manifest(result: Any) -> dict[str, Any]:
         "frequency_operator_mode": result.config.frequency_operator.mode,
         "frequency_operator_dt_s": result.config.frequency_operator.dt_s,
         "harmonic_convention": result.config.frequency_operator.harmonic_convention,
+        "frequency_operator_spatial_discretization": (
+            result.config.frequency_operator.spatial_discretization
+        ),
         "medium_definition": "M = diag(1 / v^2)",
         "velocity_file": result.velocity_result.input_path_text,
         "velocity_file_relative_to_project": _relative_or_text(
@@ -384,6 +418,7 @@ def build_system_metadata(result: Any, system: Any) -> dict[str, Any]:
         "B_shape": list(system.B.shape),
         "Q_shape": list(system.Q.shape),
         "A_symmetry": system.symmetry,
+        "coordinate_pml": system.operator_metadata,
         "files": {
             "A_csr": "A_csr.npz",
             "A_mtx": "A.mtx",
@@ -440,6 +475,7 @@ def build_matrix_diagnostics(result: Any, system: Any) -> dict[str, Any]:
         "temporal_symbol_max_abs_imag": (
             _array_component_max(temporal.imag) if temporal is not None else None
         ),
+        "coordinate_pml": system.operator_metadata,
         "periodic_wraparound": False,
     }
 
@@ -482,7 +518,25 @@ def build_boundary_metadata(result: Any) -> dict[str, Any]:
             "zero_in_physical_domain": bool(
                 np.all(domain.damping_profile[domain.physical_domain_mask] == 0.0)
             ),
-            "applied_to_frequency_matrix": _uses_damped_operator(result),
+            "applied_to_frequency_matrix": bool(
+                result.config.frequency_operator.mode
+                in {"forward_discrete_damped", "forward_discrete_pml"}
+            ),
+        },
+        "directional_profiles": {
+            "sigma_x_file": "sigma_x.npy",
+            "sigma_z_file": "sigma_z.npy",
+            "sigma_x_nonzero_only_left_right": bool(
+                np.all(domain.sigma_x[:, domain.physical_x_slice] == 0.0)
+            ),
+            "sigma_z_nonzero_only_top_bottom": bool(
+                np.all(domain.sigma_z[domain.physical_z_slice, :] == 0.0)
+            ),
+            "sigma_x_maximum_per_s": float(np.max(domain.sigma_x)),
+            "sigma_z_maximum_per_s": float(np.max(domain.sigma_z)),
+            "applied_to_frequency_matrix": bool(
+                result.config.frequency_operator.mode == "coordinate_stretched_pml"
+            ),
         },
         "forward_reference_compatibility": domain.damping_compatibility_audit,
         "source_mapping": mapping_to_dict(result.source_mapping),
@@ -498,6 +552,20 @@ def build_operator_metadata(result: Any) -> dict[str, Any]:
         dx_m=result.config.grid.dx_m,
         dz_m=result.config.grid.dz_m,
     )
+    if result.config.frequency_operator.mode == "coordinate_stretched_pml":
+        metadata = {
+            "spatial_order": 2,
+            "stencil": "conservative variable-coefficient face flux",
+            "operator_definition": (
+                "Gx.T diag(s_z/s_x) Gx + Gz.T diag(s_x/s_z) Gz"
+            ),
+            "node_to_face_averaging": "arithmetic",
+            "outer_boundary_handling": "zero exterior ghost faces",
+            "periodic_wraparound": False,
+            "damping_applied_to_operator": True,
+            "dx_m": float(result.config.grid.dx_m),
+            "dz_m": float(result.config.grid.dz_m),
+        }
     return {
         "schema_version": "1.0",
         **metadata,
@@ -508,6 +576,50 @@ def build_operator_metadata(result: Any) -> dict[str, Any]:
         "K_dtype": str(result.K.dtype),
         "flatten_order": "C",
         "index_formula": "p = iz * padded_nx + ix",
+    }
+
+
+def build_coordinate_pml_metadata(result: Any) -> dict[str, Any]:
+    domain = result.padded_domain
+    return {
+        "schema_version": "1.0",
+        "operator_mode": "coordinate_stretched_pml",
+        "harmonic_convention": "u = Re{U exp(-i*omega*t)}",
+        "stretch_factors": {
+            "s_x": "1 + i*sigma_x/omega",
+            "s_z": "1 + i*sigma_z/omega",
+        },
+        "conservative_operator": (
+            "-d/dx[(s_z/s_x)dU/dx] - d/dz[(s_x/s_z)dU/dz] "
+            "- omega^2(s_x*s_z/v^2)U = Q"
+        ),
+        "spatial_discretization": "conservative_flux_second_order",
+        "true_spatial_order": 2,
+        "node_to_face_averaging": "arithmetic",
+        "outer_boundary_handling": "zero exterior ghost faces",
+        "periodic_wraparound": False,
+        "directional_profile_files": {
+            "sigma_x": "sigma_x.npy",
+            "sigma_z": "sigma_z.npy",
+        },
+        "sigma_x_zero_in_physical_domain": bool(
+            np.all(domain.sigma_x[domain.physical_domain_mask] == 0.0)
+        ),
+        "sigma_z_zero_in_physical_domain": bool(
+            np.all(domain.sigma_z[domain.physical_domain_mask] == 0.0)
+        ),
+        "source_is_unstretched": bool(
+            domain.sigma_x.ravel(order="C")[result.source_mapping.padded_flat_index]
+            == 0.0
+            and domain.sigma_z.ravel(order="C")[
+                result.source_mapping.padded_flat_index
+            ]
+            == 0.0
+        ),
+        "frequency_systems": {
+            system.directory_name: system.operator_metadata
+            for system in result.systems
+        },
     }
 
 
@@ -583,10 +695,16 @@ def _uses_damped_operator(result: Any) -> bool:
     return result.config.frequency_operator.mode in {
         "forward_discrete_damped",
         "forward_discrete_pml",
+        "coordinate_stretched_pml",
     }
 
 
 def _operator_definition(result: Any) -> str:
+    if result.config.frequency_operator.mode == "coordinate_stretched_pml":
+        return (
+            "A_j = Gx.T diag(s_z/s_x) Gx + Gz.T diag(s_x/s_z) Gz "
+            "- omega_j^2 diag(s_x*s_z/v^2)"
+        )
     if _uses_damped_operator(result):
         return (
             "A_j = K + diag(M_diag * "
@@ -596,6 +714,8 @@ def _operator_definition(result: Any) -> str:
 
 
 def _rhs_definition(result: Any) -> str:
+    if result.config.frequency_operator.mode == "coordinate_stretched_pml":
+        return "Q_j = S_forward_DFT(f_j) e_p; source lies where s_x=s_z=1"
     if _uses_damped_operator(result):
         return "Q_j = S_forward_DFT(f_j) e_p"
     return "Q_j = M B_j"

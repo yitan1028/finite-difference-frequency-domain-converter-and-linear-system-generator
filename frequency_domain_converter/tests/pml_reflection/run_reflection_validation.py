@@ -6,6 +6,7 @@ import gc
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass, replace
@@ -32,7 +33,9 @@ if str(SRC_DIR) not in sys.path:
 from fd_converter.boundary import PaddedDomain, build_padded_domain, shift_source_index
 from fd_converter.config import RunConfig, load_config, resolve_output_dir
 from fd_converter.operators import (
+    assemble_coordinate_stretched_pml_matrix,
     assemble_forward_discrete_damped_matrix,
+    build_conservative_gradient_operators,
     build_medium_operator,
     build_spatial_operator,
 )
@@ -48,10 +51,17 @@ from fd_converter.velocity import load_velocity
 
 ALL_FREQUENCIES_HZ = (5.0, 10.0, 15.0, 20.0)
 SEARCH_FREQUENCIES_HZ = (10.0, 20.0)
-SEARCH_POWERS = (3.0, 4.0, 5.0, 6.0)
-CORE_STRENGTH_SCALES = (1.0, 2.0, 4.0)
-AVAILABLE_STRENGTH_SCALES = (0.75, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0)
-REFERENCE_PARAMETERS = {"power": 3.0, "strength_scale": 4.0, "corner": "sum"}
+SEARCH_POWERS = (2.0, 3.0, 4.0)
+CORE_STRENGTH_SCALES = (1.0, 2.0)
+AVAILABLE_STRENGTH_SCALES = (0.5, 1.0, 1.5, 2.0)
+REFERENCE_PARAMETERS = {"power": 3.0, "strength_scale": 1.0}
+SPONGE_PARAMETERS = {"padding_cells": 30, "power": 3.0, "strength_scale": 2.0}
+HISTORICAL_SPONGE_INTERIOR_ERRORS = {
+    5.0: 0.36763593066095357,
+    10.0: 0.1385091667574806,
+    15.0: 0.03862873036702846,
+    20.0: 0.009879563752333113,
+}
 REFERENCE_CONVERGENCE_TOLERANCE = 1.0e-2
 SOURCE_EXCLUSION_RADIUS_CELLS = 3
 MEANINGFUL_RECEIVER_FRACTION = 1.0e-2
@@ -68,16 +78,16 @@ PRACTICAL_IMPROVEMENT = 10.0
 
 @dataclass(frozen=True)
 class Candidate:
+    formulation: str
     padding_cells: int
     power: float
     strength_scale: float
-    corner: str
 
     @property
     def identifier(self) -> str:
         scale = f"{self.strength_scale:.6g}".replace(".", "p")
         power = f"{self.power:.6g}".replace(".", "p")
-        return f"pad{self.padding_cells}_power{power}_scale{scale}_{self.corner}"
+        return f"{self.formulation}_pad{self.padding_cells}_power{power}_scale{scale}"
 
 
 @dataclass
@@ -112,7 +122,7 @@ class CaseRunner:
         self.context = context
         self.work_root = work_root
         self.work_root.mkdir(parents=True, exist_ok=True)
-        self.operator_cache: dict[int, tuple[Any, np.ndarray]] = {}
+        self.operator_cache: dict[tuple[str, int], tuple[Any, ...]] = {}
 
     def solve(
         self,
@@ -133,7 +143,7 @@ class CaseRunner:
                 dx_m=self.context.config.grid.dx_m,
                 dz_m=self.context.config.grid.dz_m,
             )
-            K, M_diag = self._operators(candidate.padding_cells, domain)
+            operators = self._operators(candidate.formulation, candidate.padding_cells, domain)
             nz, nx = domain.padded_shape
             source_mapping = shift_source_index(
                 self.context.source_physical_iz,
@@ -144,18 +154,34 @@ class CaseRunner:
                 padded_nx=nx,
                 padding=domain.padding,
             )
-            dt_s = self.context.config.frequency_operator.dt_s
-            assert dt_s is not None
             systems: dict[float, SystemResult] = {}
             for frequency_hz in frequencies_hz:
                 frequency = float(frequency_hz)
-                A, omega, _ = assemble_forward_discrete_damped_matrix(
-                    K,
-                    M_diag,
-                    domain.damping_profile,
-                    frequency,
-                    dt_s,
-                )
+                if candidate.formulation == "coordinate_stretched_pml":
+                    gradients = (operators[0], operators[1])
+                    A, omega, _ = assemble_coordinate_stretched_pml_matrix(
+                        domain.velocity_padded,
+                        domain.sigma_x,
+                        domain.sigma_z,
+                        frequency,
+                        self.context.config.grid.dx_m,
+                        self.context.config.grid.dz_m,
+                        gradients=gradients,
+                    )
+                elif candidate.formulation == "forward_discrete_sponge":
+                    dt_s = self.context.config.frequency_operator.dt_s
+                    assert dt_s is not None
+                    A, omega, _ = assemble_forward_discrete_damped_matrix(
+                        operators[0],
+                        operators[1],
+                        domain.damping_profile,
+                        frequency,
+                        dt_s,
+                    )
+                else:
+                    raise ValueError(
+                        f"Unsupported validation formulation {candidate.formulation!r}."
+                    )
                 Q = build_source_matrix(
                     nz * nx,
                     source_mapping.padded_flat_index,
@@ -198,7 +224,7 @@ class CaseRunner:
             strength_scale=(
                 float(candidate.strength_scale) if damping_enabled else 0.0
             ),
-            corner_combination=candidate.corner,
+            corner_combination="maximum",
         )
         return replace(
             configured,
@@ -210,12 +236,22 @@ class CaseRunner:
         )
 
     def _operators(
-        self, padding_cells: int, domain: PaddedDomain
-    ) -> tuple[Any, np.ndarray]:
-        cached = self.operator_cache.get(padding_cells)
+        self, formulation: str, padding_cells: int, domain: PaddedDomain
+    ) -> tuple[Any, ...]:
+        key = (formulation, padding_cells)
+        cached = self.operator_cache.get(key)
         if cached is not None:
             return cached
         nz, nx = domain.padded_shape
+        if formulation == "coordinate_stretched_pml":
+            gradients = build_conservative_gradient_operators(
+                nz,
+                nx,
+                self.context.config.grid.dx_m,
+                self.context.config.grid.dz_m,
+            )
+            self.operator_cache[key] = gradients
+            return gradients
         K = build_spatial_operator(
             nz=nz,
             nx=nx,
@@ -225,25 +261,27 @@ class CaseRunner:
             spatial_order=4,
         )
         M_diag = build_medium_operator(domain.velocity_padded)
-        self.operator_cache[padding_cells] = (K, M_diag)
+        self.operator_cache[key] = (K, M_diag)
         return K, M_diag
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Autonomously optimize the real-model forward-discrete sponge."
+        description="Autonomously optimize the real-model coordinate-stretched PML."
     )
     parser.add_argument(
         "--config",
         type=Path,
-        default=PROJECT_ROOT / "configs" / "first_layered_run_pml30.json",
+        default=PROJECT_ROOT / "configs" / "first_layered_run_coordinate_pml.json",
     )
     parser.add_argument(
         "--results",
         type=Path,
         default=Path(__file__).resolve().parent / "results",
     )
-    parser.add_argument("--mode", choices=("optimize", "final"), default="optimize")
+    parser.add_argument(
+        "--mode", choices=("optimize", "final", "refresh-git"), default="optimize"
+    )
     return parser.parse_args()
 
 
@@ -266,8 +304,10 @@ def main() -> int:
     try:
         if args.mode == "optimize":
             report = optimize(context, runner, results_dir)
-        else:
+        elif args.mode == "final":
             report = render_selected_final(context, runner, results_dir)
+        else:
+            report = refresh_git_metadata(results_dir)
     finally:
         shutil.rmtree(work_root, ignore_errors=True)
     print(report_text(report))
@@ -278,8 +318,10 @@ def load_context(config_path: Path) -> ValidationContext:
     config = load_config(config_path)
     if config.input is None:
         raise ValueError("Reflection validation requires file-based velocity input.")
-    if config.frequency_operator.mode != "forward_discrete_pml":
-        raise ValueError("Reflection validation requires forward_discrete_pml mode.")
+    if config.frequency_operator.mode != "coordinate_stretched_pml":
+        raise ValueError(
+            "Reflection validation requires coordinate_stretched_pml mode."
+        )
     widths = {
         config.boundary.top_padding_cells,
         config.boundary.bottom_padding_cells,
@@ -331,23 +373,34 @@ def optimize(
     reference_info, reference = establish_reference(context, runner, decisions)
     reference_thickness = int(reference_info["selected_thickness_cells"])
 
-    baseline = Candidate(20, 3.0, 4.0, "sum")
-    no_pml20 = runner.solve(baseline, SEARCH_FREQUENCIES_HZ, damping_enabled=False)
-    baseline_case = runner.solve(baseline, SEARCH_FREQUENCIES_HZ)
-    baseline_rows = compare_case(
-        context,
-        baseline_case,
-        reference,
-        no_pml20,
+    no_pml20 = runner.solve(
+        Candidate("coordinate_stretched_pml", 20, 3.0, 0.0),
         SEARCH_FREQUENCIES_HZ,
-        stage="original_pml20_baseline",
+        damping_enabled=False,
     )
-    candidate_rows.extend(baseline_rows)
-    decisions.extend(diagnose_rows(baseline_rows, "Original PML20"))
+    sponge_candidate = Candidate(
+        "forward_discrete_sponge",
+        SPONGE_PARAMETERS["padding_cells"],
+        SPONGE_PARAMETERS["power"],
+        SPONGE_PARAMETERS["strength_scale"],
+    )
+    sponge_search = runner.solve(sponge_candidate, SEARCH_FREQUENCIES_HZ)
+    no_sponge = runner.solve(
+        replace(sponge_candidate, strength_scale=0.0),
+        SEARCH_FREQUENCIES_HZ,
+        damping_enabled=False,
+    )
+    sponge_rows = compare_case(
+        context,
+        sponge_search,
+        reference,
+        no_sponge,
+        SEARCH_FREQUENCIES_HZ,
+        stage="optimized_scalar_sponge_baseline",
+    )
+    decisions.extend(diagnose_rows(sponge_rows, "Optimized scalar sponge"))
 
-    evaluated: dict[tuple[Any, ...], list[dict[str, Any]]] = {
-        _evaluation_key(baseline, SEARCH_FREQUENCIES_HZ): baseline_rows
-    }
+    evaluated: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
 
     def evaluate(candidate: Candidate, stage: str, no_pml: CaseResult) -> list[dict[str, Any]]:
         key = _evaluation_key(candidate, SEARCH_FREQUENCIES_HZ)
@@ -371,8 +424,10 @@ def optimize(
     for power in SEARCH_POWERS:
         per_power: list[tuple[Candidate, list[dict[str, Any]]]] = []
         for scale in CORE_STRENGTH_SCALES:
-            candidate = Candidate(20, power, scale, "sum")
-            per_power.append((candidate, evaluate(candidate, "coarse_20", no_pml20)))
+            candidate = Candidate("coordinate_stretched_pml", 20, power, scale)
+            per_power.append(
+                (candidate, evaluate(candidate, "coordinate_coarse_20", no_pml20))
+            )
         core_best = select_best(per_power)
         neighbor_scales = adaptive_neighbor_scales(core_best[0].strength_scale)
         decisions.append(
@@ -381,14 +436,16 @@ def optimize(
             f"{neighbor_scales}."
         )
         for scale in neighbor_scales:
-            candidate = Candidate(20, power, scale, "sum")
-            per_power.append((candidate, evaluate(candidate, "adaptive_20", no_pml20)))
+            candidate = Candidate("coordinate_stretched_pml", 20, power, scale)
+            per_power.append(
+                (candidate, evaluate(candidate, "coordinate_adaptive_20", no_pml20))
+            )
         power_best.append(select_best(per_power))
 
     best20, best20_rows = select_best(power_best)
     decisions.append(
         f"Coarse/adaptive 20-cell search selected power={best20.power:g}, "
-        f"scale={best20.strength_scale:g}, corner={best20.corner} based on "
+        f"scale={best20.strength_scale:g} based on "
         "worst interior-5 complex error, then receiver/amplitude/phase error."
     )
 
@@ -416,32 +473,21 @@ def optimize(
             break
         best20, best20_rows = refined, refined_rows
 
-    alternate_corner = "maximum" if best20.corner == "sum" else "sum"
-    corner_candidate = replace(best20, corner=alternate_corner)
-    corner_rows = evaluate(corner_candidate, "corner_comparison_20", no_pml20)
-    corner_best, corner_best_rows = select_best(
-        [(best20, best20_rows), (corner_candidate, corner_rows)]
+    decisions.append(
+        "Coordinate corners use simultaneous independent x/z stretching; no scalar "
+        "corner-combination rule is applied."
     )
-    if corner_best.corner != best20.corner:
-        decisions.append(
-            f"Corner comparison retained {corner_best.corner}: it reduced the "
-            "priority error tuple without unacceptable outer-edge growth."
-        )
-        best20, best20_rows = corner_best, corner_best_rows
-    else:
-        decisions.append(
-            f"Corner comparison rejected {alternate_corner}; {best20.corner} "
-            "gave the better interior/receiver tradeoff."
-        )
 
-    no_pml30_candidate = Candidate(30, best20.power, 0.0, best20.corner)
+    no_pml30_candidate = Candidate(
+        "coordinate_stretched_pml", 30, best20.power, 0.0
+    )
     no_pml30 = runner.solve(
         no_pml30_candidate, SEARCH_FREQUENCIES_HZ, damping_enabled=False
     )
     candidates30: list[tuple[Candidate, list[dict[str, Any]]]] = []
     for multiplier in (0.8, 1.0, 1.2):
         scale = round(best20.strength_scale * multiplier, 6)
-        candidate = Candidate(30, best20.power, scale, best20.corner)
+        candidate = Candidate("coordinate_stretched_pml", 30, best20.power, scale)
         case = runner.solve(candidate, SEARCH_FREQUENCIES_HZ)
         rows = compare_case(
             context,
@@ -449,40 +495,72 @@ def optimize(
             reference,
             no_pml30,
             SEARCH_FREQUENCIES_HZ,
-            stage="diagnostic_30",
+            stage="coordinate_diagnostic_30",
         )
         candidate_rows.extend(rows)
         candidates30.append((candidate, rows))
         del case
     best30, best30_rows = select_best(candidates30)
-    selected, selected_rows = choose_padding(
-        best20, best20_rows, best30, best30_rows, decisions
-    )
-
     reference_all = runner.solve(
         Candidate(
+            "coordinate_stretched_pml",
             reference_thickness,
             REFERENCE_PARAMETERS["power"],
             REFERENCE_PARAMETERS["strength_scale"],
-            REFERENCE_PARAMETERS["corner"],
         ),
         ALL_FREQUENCIES_HZ,
     )
-    no_pml_selected = runner.solve(
-        replace(selected, strength_scale=0.0),
+    no_pml20_all = runner.solve(
+        replace(best20, strength_scale=0.0),
         ALL_FREQUENCIES_HZ,
         damping_enabled=False,
     )
-    selected_case = runner.solve(selected, ALL_FREQUENCIES_HZ)
-    final_rows = compare_case(
-        context,
-        selected_case,
-        reference_all,
-        no_pml_selected,
+    no_pml30_all = runner.solve(
+        replace(best30, strength_scale=0.0),
         ALL_FREQUENCIES_HZ,
-        stage="preliminary_all_frequency",
+        damping_enabled=False,
     )
-    candidate_rows.extend(final_rows)
+    best20_case = runner.solve(best20, ALL_FREQUENCIES_HZ)
+    best20_all_rows = compare_case(
+        context,
+        best20_case,
+        reference_all,
+        no_pml20_all,
+        ALL_FREQUENCIES_HZ,
+        stage="coordinate_best20_all_frequency",
+    )
+    best30_case = runner.solve(best30, ALL_FREQUENCIES_HZ)
+    best30_all_rows = compare_case(
+        context,
+        best30_case,
+        reference_all,
+        no_pml30_all,
+        ALL_FREQUENCIES_HZ,
+        stage="coordinate_best30_all_frequency",
+    )
+    candidate_rows.extend(best20_all_rows)
+    candidate_rows.extend(best30_all_rows)
+    selected, final_rows = choose_padding(
+        best20, best20_all_rows, best30, best30_all_rows, decisions
+    )
+    selected_case = best20_case if selected.padding_cells == 20 else best30_case
+    no_pml_selected = no_pml20_all if selected.padding_cells == 20 else no_pml30_all
+
+    sponge_all = runner.solve(sponge_candidate, ALL_FREQUENCIES_HZ)
+    no_sponge_all = runner.solve(
+        replace(sponge_candidate, strength_scale=0.0),
+        ALL_FREQUENCIES_HZ,
+        damping_enabled=False,
+    )
+    sponge_rows = compare_case(
+        context,
+        sponge_all,
+        reference_all,
+        no_sponge_all,
+        ALL_FREQUENCIES_HZ,
+        stage="optimized_scalar_sponge_baseline",
+    )
+    attach_sponge_improvement(final_rows, sponge_rows)
 
     correction_candidates, correction_reason = targeted_correction_candidates(
         selected, final_rows
@@ -513,10 +591,12 @@ def optimize(
         candidate_rows.extend(rows)
         correction_pool.append((candidate, rows, case))
     selected, final_rows, selected_case = select_best_final(correction_pool)
+    attach_sponge_improvement(final_rows, sponge_rows)
     decisions.append(
         f"Final correction round retained padding={selected.padding_cells}, "
         f"power={selected.power:g}, scale={selected.strength_scale:g}, "
-        f"corner={selected.corner}. No further correction rounds were run."
+        "with the conservative directional formulation. No further correction "
+        "rounds were run."
     )
 
     diagnosis = diagnose_rows(final_rows, "Final selected case")
@@ -526,10 +606,13 @@ def optimize(
         context, selected_case, reference_all, final_rows, results_dir
     )
     write_candidate_metrics(results_dir, candidate_rows)
+    attach_final_receiver_data(
+        context, selected_case, reference_all, final_rows
+    )
     report = build_report(
         context=context,
         reference_info=reference_info,
-        baseline_rows=baseline_rows,
+        sponge_rows=sponge_rows,
         candidate_rows=candidate_rows,
         decisions=decisions,
         selected=selected,
@@ -546,28 +629,29 @@ def establish_reference(
 ) -> tuple[dict[str, Any], CaseResult]:
     def candidate(width: int) -> Candidate:
         return Candidate(
+            "coordinate_stretched_pml",
             width,
             REFERENCE_PARAMETERS["power"],
             REFERENCE_PARAMETERS["strength_scale"],
-            REFERENCE_PARAMETERS["corner"],
         )
 
+    case40 = runner.solve(candidate(40), SEARCH_FREQUENCIES_HZ)
     case60 = runner.solve(candidate(60), SEARCH_FREQUENCIES_HZ)
-    case80 = runner.solve(candidate(80), SEARCH_FREQUENCIES_HZ)
-    comparisons = compare_reference_pair(context, case60, case80, "60_vs_80")
+    comparisons = compare_reference_pair(context, case40, case60, "40_vs_60")
     converged = reference_pair_converged(comparisons)
-    selected = case80
+    selected = case60
     if not converged:
         decisions.append(
-            "60 versus 80 exceeded 1% at 10 Hz, so a 100-cell reference was required."
+            "40 versus 60 exceeded 1%, so an 80-cell coordinate-PML reference "
+            "was required."
         )
-        case100 = runner.solve(candidate(100), SEARCH_FREQUENCIES_HZ)
+        case80 = runner.solve(candidate(80), SEARCH_FREQUENCIES_HZ)
         comparisons.extend(
-            compare_reference_pair(context, case80, case100, "80_vs_100")
+            compare_reference_pair(context, case60, case80, "60_vs_80")
         )
-        selected = case100
+        selected = case80
         converged = reference_pair_converged(
-            [row for row in comparisons if row["comparison"] == "80_vs_100"]
+            [row for row in comparisons if row["comparison"] == "60_vs_80"]
         )
     selected_thickness = selected.candidate.padding_cells
     decisions.append(
@@ -673,6 +757,80 @@ def compare_case(
             }
         )
     return rows
+
+
+def attach_sponge_improvement(
+    coordinate_rows: list[dict[str, Any]],
+    sponge_rows: list[dict[str, Any]],
+) -> None:
+    sponge_by_frequency = {
+        float(row["frequency_hz"]): row for row in sponge_rows
+    }
+    for row in coordinate_rows:
+        sponge = sponge_by_frequency[float(row["frequency_hz"])]
+        sponge_error = float(sponge["interior_5_complex_relative_error"])
+        row["optimized_sponge_interior_5_complex_error"] = sponge_error
+        row["improvement_over_optimized_sponge"] = _safe_ratio(
+            sponge_error,
+            float(row["interior_5_complex_relative_error"]),
+        )
+
+
+def direct_comparison_rows(
+    coordinate_rows: list[dict[str, Any]],
+    sponge_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    sponge_by_frequency = {
+        float(row["frequency_hz"]): row for row in sponge_rows
+    }
+    rows: list[dict[str, Any]] = []
+    for coordinate in coordinate_rows:
+        frequency = float(coordinate["frequency_hz"])
+        sponge = sponge_by_frequency[frequency]
+        rows.append(
+            {
+                "frequency_hz": frequency,
+                "no_boundary_interior_5_complex_error": coordinate[
+                    "no_damping_interior_5_complex_error"
+                ],
+                "optimized_scalar_sponge_interior_5_complex_error": sponge[
+                    "interior_5_complex_relative_error"
+                ],
+                "coordinate_pml_interior_5_complex_error": coordinate[
+                    "interior_5_complex_relative_error"
+                ],
+                "coordinate_improvement_over_no_boundary": coordinate[
+                    "improvement_over_no_damping"
+                ],
+                "coordinate_improvement_over_scalar_sponge": coordinate.get(
+                    "improvement_over_optimized_sponge"
+                ),
+            }
+        )
+    return rows
+
+
+def attach_final_receiver_data(
+    context: ValidationContext,
+    coordinate_case: CaseResult,
+    reference_case: CaseResult,
+    rows: list[dict[str, Any]],
+) -> None:
+    rows_by_frequency = {float(row["frequency_hz"]): row for row in rows}
+    for frequency in ALL_FREQUENCIES_HZ:
+        coordinate = physical_grid(coordinate_case, frequency)
+        reference = physical_grid(reference_case, frequency)
+        coordinate_values = np.asarray(
+            [coordinate[iz, ix] for iz, ix in context.receiver_indices]
+        )
+        reference_values = np.asarray(
+            [reference[iz, ix] for iz, ix in context.receiver_indices]
+        )
+        rows_by_frequency[frequency]["receiver_comparison_data"] = {
+            "physical_indices_iz_ix": [list(value) for value in context.receiver_indices],
+            "coordinate_pml": coordinate_values,
+            "reference": reference_values,
+        }
 
 
 def field_errors(
@@ -925,9 +1083,18 @@ def aggregate_metrics(rows: list[dict[str, Any]]) -> dict[str, float]:
 
 def selection_key(rows: list[dict[str, Any]]) -> tuple[float, ...]:
     aggregate = aggregate_metrics(rows)
-    outer_penalty = max(0.0, aggregate["worst_outer"] / 5.0e-3 - 1.0)
+    worst_outer_target_ratio = max(
+        row["outer_edge_amplitude_ratio"]
+        / (
+            PRACTICAL_OUTER_RATIO_5HZ
+            if row["frequency_hz"] == 5.0
+            else PRACTICAL_OUTER_RATIO_OTHER
+        )
+        for row in rows
+    )
     return (
-        aggregate["worst_interior_5"] + outer_penalty,
+        max(0.0, worst_outer_target_ratio - 1.0),
+        aggregate["worst_interior_5"],
         aggregate["worst_receiver"],
         aggregate["worst_amplitude"],
         aggregate["worst_phase"],
@@ -1026,18 +1193,19 @@ def targeted_correction_candidates(
         and row["weighted_phase_error_radians"] > 0.05
         for row in rows
     )
-    corner_dominates = any(
-        row["corner_complex_relative_error"]
-        > 1.5 * row["interior_5_complex_relative_error"]
-        for row in rows
-    )
     candidates: list[Candidate] = []
     reasons: list[str] = []
     if outer_failed:
         candidates.append(
             replace(selected, strength_scale=round(selected.strength_scale * 1.25, 6))
         )
-        reasons.append("outer-edge amplitude remained high, so strength was increased 25%")
+        candidates.append(
+            replace(selected, strength_scale=round(selected.strength_scale * 1.5, 6))
+        )
+        reasons.append(
+            "outer-edge amplitude remained high, so strength was increased by "
+            "25% and 50% within one targeted correction round"
+        )
     elif phase_dominates:
         candidates.append(
             replace(selected, strength_scale=round(selected.strength_scale * 0.8, 6))
@@ -1050,10 +1218,6 @@ def targeted_correction_candidates(
             replace(selected, strength_scale=round(selected.strength_scale * 0.8, 6))
         )
         reasons.append("outer attenuation was adequate but field distortion remained high, so strength was reduced 20%")
-    if corner_dominates:
-        alternate = "maximum" if selected.corner == "sum" else "sum"
-        candidates.append(replace(selected, corner=alternate))
-        reasons.append("corner error was elevated, so the alternate corner rule was checked")
     unique = list({candidate: None for candidate in candidates}.keys())
     return unique, "Final targeted correction: " + "; ".join(reasons or ["no unambiguous correction was indicated"])
 
@@ -1085,6 +1249,7 @@ def classify_acceptance(rows: list[dict[str, Any]]) -> str:
         and row["receiver_max_meaningful_complex_error"] <= STRONG_RECEIVER_ERROR
         and row["outer_edge_amplitude_ratio"] <= STRONG_OUTER_RATIO
         and row["improvement_over_no_damping"] > 1.0
+        and row.get("improvement_over_optimized_sponge", 0.0) > 1.0
         for row in rows
     )
     if strong:
@@ -1099,6 +1264,7 @@ def classify_acceptance(rows: list[dict[str, Any]]) -> str:
             else PRACTICAL_OUTER_RATIO_OTHER
         )
         and row["improvement_over_no_damping"] >= PRACTICAL_IMPROVEMENT
+        and row.get("improvement_over_optimized_sponge", 0.0) > 1.0
         and row["boundary_localization_ratio"] <= 2.0
         for row in rows
     )
@@ -1195,10 +1361,10 @@ def write_candidate_metrics(results_dir: Path, rows: list[dict[str, Any]]) -> No
     write_json(results_dir / "candidate_metrics.json", {"rows": rows})
     fields = [
         "stage",
+        "formulation",
         "padding_cells",
         "power",
         "strength_scale",
-        "corner_combination",
         "frequency_hz",
         "physical_complex_relative_error",
         "physical_amplitude_relative_error",
@@ -1212,6 +1378,7 @@ def write_candidate_metrics(results_dir: Path, rows: list[dict[str, Any]]) -> No
         "source_excluded_complex_relative_error",
         "outer_edge_amplitude_ratio",
         "improvement_over_no_damping",
+        "improvement_over_optimized_sponge",
         "solve_runtime_seconds",
         "matrix_shape",
         "matrix_nnz",
@@ -1229,7 +1396,7 @@ def build_report(
     *,
     context: ValidationContext,
     reference_info: dict[str, Any],
-    baseline_rows: list[dict[str, Any]],
+    sponge_rows: list[dict[str, Any]],
     candidate_rows: list[dict[str, Any]],
     decisions: list[str],
     selected: Candidate,
@@ -1237,33 +1404,91 @@ def build_report(
     pass_level: str,
     plot_paths: list[str],
 ) -> dict[str, Any]:
-    config_name = f"first_layered_run_pml{selected.padding_cells}.json"
-    output_name = f"first_layered_run_pml{selected.padding_cells}"
+    git = git_metadata()
     conclusion = (
-        "The forward-discrete sponge is viable for the matched TD solver."
+        "The coordinate-stretched PML meets the reflection targets and is the "
+        "recommended frequency-domain absorbing boundary."
         if pass_level != "NOT SUFFICIENT"
         else (
-            "The optimized forward-discrete sponge remains too reflective or "
-            "distortive; the next boundary task should replace it with a true "
-            "coordinate-stretched frequency-domain PML."
+            "The coordinate-stretched PML remains outside the practical targets; "
+            "the limiting discretization or formulation requires further work."
         )
     )
+    sponge_by_frequency = {
+        float(row["frequency_hz"]): row for row in sponge_rows
+    }
+    direct_comparison = []
+    for row in final_rows:
+        frequency = float(row["frequency_hz"])
+        sponge = sponge_by_frequency[frequency]
+        direct_comparison.append(
+            {
+                "frequency_hz": frequency,
+                "no_boundary_interior_5_complex_error": row[
+                    "no_damping_interior_5_complex_error"
+                ],
+                "optimized_scalar_sponge_interior_5_complex_error": sponge[
+                    "interior_5_complex_relative_error"
+                ],
+                "coordinate_pml_interior_5_complex_error": row[
+                    "interior_5_complex_relative_error"
+                ],
+                "coordinate_improvement_over_no_boundary": row[
+                    "improvement_over_no_damping"
+                ],
+                "coordinate_improvement_over_scalar_sponge": row.get(
+                    "improvement_over_optimized_sponge"
+                ),
+            }
+        )
     return {
-        "schema_version": "2.0",
+        "schema_version": "3.0",
+        "git": git,
+        "files_changed_or_added": git["working_tree_files"],
         "model": "actual selected 70 x 70 OpenFWI model",
+        "coordinate_pml_formulation": (
+            "-d/dx[(s_z/s_x)dU/dx] - d/dz[(s_x/s_z)dU/dz] "
+            "- omega^2(s_x*s_z/v^2)U = Q"
+        ),
+        "harmonic_convention": "u = Re{U exp(-i*omega*t)}",
+        "stretch_factors": {
+            "s_x": "1 + i*sigma_x/omega",
+            "s_z": "1 + i*sigma_z/omega",
+        },
+        "spatial_discretization": {
+            "name": "conservative_flux_second_order",
+            "true_order": 2,
+            "node_to_face_averaging": "arithmetic",
+            "outer_boundary": "zero exterior ghost faces",
+        },
         "reference_convergence": reference_info,
-        "original_pml20_baseline": baseline_rows,
+        "historical_optimized_sponge_interior_5_errors": (
+            HISTORICAL_SPONGE_INTERIOR_ERRORS
+        ),
+        "optimized_scalar_sponge_metrics": sponge_rows,
+        "comparison_caveat": (
+            "The direct same-RHS table compares the fourth-order forward-discrete "
+            "sponge with a second-order conservative coordinate-PML reference, so "
+            "it includes spatial/temporal discretization differences. Historical "
+            "sponge errors against its own converged sponge reference are retained "
+            "separately."
+        ),
         "candidate_count": len(candidate_rows),
         "candidate_metrics": candidate_rows,
         "autonomous_decisions": decisions,
         "selected_parameters": candidate_dict(selected),
         "selected_sigma_design": sigma_design(context, selected),
         "final_frequency_metrics": final_rows,
+        "direct_comparison": direct_comparison,
         "pass_level": pass_level,
         "conclusion": conclusion,
         "paths": {
-            "production_config": str(PROJECT_ROOT / "configs" / config_name),
-            "production_output": str(PROJECT_ROOT / "outputs" / output_name),
+            "production_config": str(
+                PROJECT_ROOT / "configs" / "first_layered_run_coordinate_pml.json"
+            ),
+            "production_output": str(
+                PROJECT_ROOT / "outputs" / "first_layered_run_coordinate_pml"
+            ),
             "txt_report": str(
                 Path(__file__).resolve().parent / "results" / "final_report.txt"
             ),
@@ -1275,6 +1500,12 @@ def build_report(
                 / "results"
                 / "candidate_metrics.csv"
             ),
+            "candidate_metrics_json": str(
+                Path(__file__).resolve().parent
+                / "results"
+                / "candidate_metrics.json"
+            ),
+            "plots_directory": str(Path(__file__).resolve().parent / "results"),
             "plots": plot_paths,
         },
     }
@@ -1292,7 +1523,7 @@ def sigma_design(context: ValidationContext, candidate: Candidate) -> dict[str, 
             configured.damping,
             power=candidate.power,
             strength_scale=candidate.strength_scale,
-            corner_combination=candidate.corner,
+            corner_combination="maximum",
         ),
     )
     domain = build_padded_domain(
@@ -1320,17 +1551,17 @@ def render_selected_final(
         previous["candidate_count"] = len(candidate_metrics)
     selection = previous["selected_parameters"]
     selected = Candidate(
+        "coordinate_stretched_pml",
         int(selection["padding_cells"]),
         float(selection["power"]),
         float(selection["strength_scale"]),
-        str(selection["corner_combination"]),
     )
     configured_width = context.config.boundary.top_padding_cells
     configured = Candidate(
+        "coordinate_stretched_pml",
         configured_width,
         context.config.boundary.damping.power,
         context.config.boundary.damping.strength_scale,
-        context.config.boundary.damping.corner_combination,
     )
     if configured != selected:
         raise ValueError(
@@ -1341,10 +1572,10 @@ def render_selected_final(
     )
     reference = runner.solve(
         Candidate(
+            "coordinate_stretched_pml",
             reference_thickness,
             REFERENCE_PARAMETERS["power"],
             REFERENCE_PARAMETERS["strength_scale"],
-            REFERENCE_PARAMETERS["corner"],
         ),
         ALL_FREQUENCIES_HZ,
     )
@@ -1362,30 +1593,75 @@ def render_selected_final(
         ALL_FREQUENCIES_HZ,
         stage="final_production_verification",
     )
+    sponge_candidate = Candidate(
+        "forward_discrete_sponge",
+        SPONGE_PARAMETERS["padding_cells"],
+        SPONGE_PARAMETERS["power"],
+        SPONGE_PARAMETERS["strength_scale"],
+    )
+    sponge = runner.solve(sponge_candidate, ALL_FREQUENCIES_HZ)
+    no_sponge = runner.solve(
+        replace(sponge_candidate, strength_scale=0.0),
+        ALL_FREQUENCIES_HZ,
+        damping_enabled=False,
+    )
+    sponge_rows = compare_case(
+        context,
+        sponge,
+        reference,
+        no_sponge,
+        ALL_FREQUENCIES_HZ,
+        stage="optimized_scalar_sponge_baseline",
+    )
+    attach_sponge_improvement(rows, sponge_rows)
+    attach_final_receiver_data(context, case, reference, rows)
     plot_paths = save_final_plots(context, case, reference, rows, results_dir)
     previous["final_frequency_metrics"] = rows
     previous["selected_sigma_design"] = sigma_design(context, selected)
+    previous["historical_optimized_sponge_interior_5_errors"] = (
+        HISTORICAL_SPONGE_INTERIOR_ERRORS
+    )
+    previous["optimized_scalar_sponge_metrics"] = sponge_rows
+    previous["comparison_caveat"] = (
+        "The direct same-RHS table compares the fourth-order forward-discrete "
+        "sponge with a second-order conservative coordinate-PML reference, so "
+        "it includes spatial/temporal discretization differences. Historical "
+        "sponge errors against its own converged sponge reference are retained "
+        "separately."
+    )
+    previous["direct_comparison"] = direct_comparison_rows(rows, sponge_rows)
     previous["pass_level"] = classify_acceptance(rows)
     previous["conclusion"] = (
-        "The forward-discrete sponge is viable for the matched TD solver."
+        "The coordinate-stretched PML meets the reflection targets and is the "
+        "recommended frequency-domain absorbing boundary."
         if previous["pass_level"] != "NOT SUFFICIENT"
         else (
-            "The optimized forward-discrete sponge remains too reflective or "
-            "distortive; the next boundary task should replace it with a true "
-            "coordinate-stretched frequency-domain PML."
+            "The coordinate-stretched PML remains outside the practical targets; "
+            "the limiting discretization or formulation requires further work."
         )
     )
-    config_name = f"first_layered_run_pml{selected.padding_cells}.json"
-    output_name = f"first_layered_run_pml{selected.padding_cells}"
     previous["paths"]["production_config"] = str(
-        PROJECT_ROOT / "configs" / config_name
+        PROJECT_ROOT / "configs" / "first_layered_run_coordinate_pml.json"
     )
     previous["paths"]["production_output"] = str(
-        PROJECT_ROOT / "outputs" / output_name
+        PROJECT_ROOT / "outputs" / "first_layered_run_coordinate_pml"
     )
     previous["paths"]["plots"] = plot_paths
+    previous["git"] = git_metadata()
+    previous["files_changed_or_added"] = previous["git"]["working_tree_files"]
     write_report(results_dir, previous)
     return previous
+
+
+def refresh_git_metadata(results_dir: Path) -> dict[str, Any]:
+    report_path = results_dir / "final_report.json"
+    if not report_path.is_file():
+        raise FileNotFoundError("No final report exists to refresh.")
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report["git"] = git_metadata()
+    report["files_changed_or_added"] = report["git"]["working_tree_files"]
+    write_report(results_dir, report)
+    return report
 
 
 def write_report(results_dir: Path, report: dict[str, Any]) -> None:
@@ -1399,10 +1675,21 @@ def report_text(report: dict[str, Any]) -> str:
     selected = report["selected_parameters"]
     lines = [
         "=" * 120,
-        "Autonomous Forward-Discrete Sponge Optimization Report",
+        "Autonomous Coordinate-Stretched PML Optimization Report",
         "=" * 120,
         "",
-        "1. Reference convergence",
+        "1. Git and implementation",
+        f"- branch: {report['git']['branch']}",
+        f"- HEAD: {report['git']['head_commit']}",
+        f"- origin/main baseline: {report['git']['origin_main_commit']}",
+        f"- formulation: {report['coordinate_pml_formulation']}",
+        f"- harmonic convention: {report['harmonic_convention']}",
+        "- spatial discretization: conservative_flux_second_order (true order 2)",
+        "- node-to-face averaging: arithmetic in both directions",
+        "- files changed or added:",
+        *[f"  {path}" for path in report["files_changed_or_added"]],
+        "",
+        "2. Reference convergence",
     ]
     for row in report["reference_convergence"]["comparisons"]:
         lines.append(
@@ -1417,48 +1704,82 @@ def report_text(report: dict[str, Any]) -> str:
             f"- Selected reference thickness: {report['reference_convergence']['selected_thickness_cells']} cells",
             f"- Converged to 1%: {yes_no(report['reference_convergence']['converged_to_one_percent'])}",
             "",
-            "2. Original PML20 baseline",
+            "3. Optimized scalar sponge baselines",
         ]
     )
-    for row in report["original_pml20_baseline"]:
+    lines.append("- historical interior-5 errors against the converged sponge reference:")
+    for frequency, error in report[
+        "historical_optimized_sponge_interior_5_errors"
+    ].items():
+        lines.append(f"  {float(frequency):g} Hz: {float(error):.6e}")
+    lines.append("- recomputed same-RHS errors against the coordinate-PML reference:")
+    for row in report["optimized_scalar_sponge_metrics"]:
         lines.append(metric_line(row))
+    lines.append(f"- comparison caveat: {report['comparison_caveat']}")
     lines.extend(
         [
             "",
-            f"3. Evaluated candidate rows ({report['candidate_count']})",
-            "stage | pad | power | scale | corner | Hz | interior5 | receiver | amplitude | phase(rad) | outer",
+            f"4. Evaluated coordinate-PML candidate rows ({report['candidate_count']})",
+            "stage | pad | power | scale | Hz | matrix | runtime(s) | interior5 | receiver | amplitude | phase(rad) | outer",
             "-" * 150,
         ]
     )
     for row in report.get("candidate_metrics", []):
         lines.append(
             f"{row['stage']} | {row['padding_cells']} | {row['power']:g} | "
-            f"{row['strength_scale']:g} | {row['corner_combination']} | "
-            f"{row['frequency_hz']:g} | "
+            f"{row['strength_scale']:g} | {row['frequency_hz']:g} | "
+            f"{row['matrix_shape']} | {row['solve_runtime_seconds']:.4f} | "
             f"{row['interior_5_complex_relative_error']:.6e} | "
             f"{row['receiver_complex_relative_error']:.6e} | "
             f"{row['physical_amplitude_relative_error']:.6e} | "
             f"{row['weighted_phase_error_radians']:.6e} | "
             f"{row['outer_edge_amplitude_ratio']:.6e}"
         )
-    lines.extend(["", "4. Autonomous decisions"])
+    lines.extend(["", "5. Autonomous decisions"])
     lines.extend(f"- {item}" for item in report["autonomous_decisions"])
     lines.extend(
         [
             "",
-            "5. Final selected parameters",
+            "6. Final selected parameters",
             f"- padding cells per side: {selected['padding_cells']}",
             f"- polynomial power: {selected['power']}",
             f"- strength scale: {selected['strength_scale']}",
-            f"- corner combination: {selected['corner_combination']}",
+            f"- target decay: {report['selected_sigma_design']['target_decay']}",
+            "- reference velocity rule: "
+            f"{report['selected_sigma_design']['velocity_reference_rule']}",
+            "- reference velocity: "
+            f"{report['selected_sigma_design']['velocity_reference_value_m_per_s']:.6g} m/s",
+            "- effective sigma max: "
+            f"{report['selected_sigma_design']['sides']['top']['effective_sigma_max_per_s']:.6e} 1/s",
+            "- directional corners: simultaneous independent x/z stretching",
             "",
-            "6. Final all-frequency metrics",
-            "frequency | interior5 | full complex | amplitude | phase(rad) | receiver | max receiver | outer | improvement | residual",
+            "7. Final all-frequency metrics",
+            "frequency | interior5 | full complex | amplitude | phase(rad) | receiver | max receiver | outer | no-boundary improvement | residual",
             "-" * 150,
         ]
     )
     lines.extend(metric_line(row) for row in report["final_frequency_metrics"])
-    lines.extend(["", "7. Final decomposed diagnostics"])
+    for row in report["final_frequency_metrics"]:
+        lines.append(
+            f"- {row['frequency_hz']:g} Hz matrix={row['matrix_shape']} "
+            f"nnz={row['matrix_nnz']} dtype={row['matrix_dtype']} "
+            f"runtime={row['solve_runtime_seconds']:.6f} s"
+        )
+    lines.extend(["", "8. Direct comparison"])
+    lines.append(
+        "frequency | no boundary error | scalar sponge error | coordinate PML error | vs no boundary | vs sponge"
+    )
+    lines.append("-" * 120)
+    for row in report["direct_comparison"]:
+        lines.append(
+            f"{row['frequency_hz']:8g} | "
+            f"{row['no_boundary_interior_5_complex_error']:.6e} | "
+            f"{row['optimized_scalar_sponge_interior_5_complex_error']:.6e} | "
+            f"{row['coordinate_pml_interior_5_complex_error']:.6e} | "
+            f"{row['coordinate_improvement_over_no_boundary']:.3f} | "
+            f"{row['coordinate_improvement_over_scalar_sponge']:.3f}"
+        )
+    lines.extend(["", "9. Final decomposed diagnostics"])
     for row in report["final_frequency_metrics"]:
         lines.append(
             f"- {row['frequency_hz']:g} Hz: interior10="
@@ -1471,15 +1792,17 @@ def report_text(report: dict[str, Any]) -> str:
     lines.extend(
         [
             "",
-            f"8. PASS level: {report['pass_level']}",
-            f"9. Conclusion: {report['conclusion']}",
+            f"10. PASS level: {report['pass_level']}",
+            f"11. Conclusion: {report['conclusion']}",
             "",
-            "10. Paths",
+            "12. Paths",
             f"- production config: {report['paths']['production_config']}",
             f"- production output: {report['paths']['production_output']}",
             f"- TXT report: {report['paths']['txt_report']}",
             f"- JSON report: {report['paths']['json_report']}",
             f"- candidate metrics CSV: {report['paths']['candidate_metrics_csv']}",
+            f"- candidate metrics JSON: {report['paths']['candidate_metrics_json']}",
+            f"- final plots: {report['paths']['plots_directory']}",
         ]
     )
     return "\n".join(lines) + "\n"
@@ -1502,10 +1825,10 @@ def metric_line(row: dict[str, Any]) -> str:
 
 def candidate_dict(candidate: Candidate) -> dict[str, Any]:
     return {
+        "formulation": candidate.formulation,
         "padding_cells": candidate.padding_cells,
         "power": candidate.power,
         "strength_scale": candidate.strength_scale,
-        "corner_combination": candidate.corner,
     }
 
 
@@ -1525,6 +1848,41 @@ def yes_no(value: bool) -> str:
     return "YES" if value else "NO"
 
 
+def git_metadata() -> dict[str, Any]:
+    git_root = PROJECT_ROOT.parent
+
+    def run(*args: str) -> str:
+        completed = subprocess.run(
+            ("git", *args),
+            cwd=git_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return completed.stdout.rstrip()
+
+    branch = run("branch", "--show-current")
+    head = run("rev-parse", "HEAD")
+    origin_main = run("rev-parse", "origin/main")
+    files: set[str] = set()
+    for command in (
+        ("diff", "--name-only", "origin/main...HEAD"),
+        ("diff", "--name-only"),
+        ("diff", "--cached", "--name-only"),
+    ):
+        files.update(line for line in run(*command).splitlines() if line)
+    for line in run("status", "--short").splitlines():
+        path = line[3:].strip()
+        if path and path not in {"forward.py", "one_d_solver.py"}:
+            files.add(path)
+    return {
+        "branch": branch,
+        "head_commit": head,
+        "origin_main_commit": origin_main,
+        "working_tree_files": sorted(files),
+    }
+
+
 def write_json(path: Path, value: Any) -> None:
     with path.open("w", encoding="utf-8") as stream:
         json.dump(jsonable(value), stream, indent=2, sort_keys=True)
@@ -1535,9 +1893,9 @@ def jsonable(value: Any) -> Any:
     if isinstance(value, Path):
         return str(value)
     if isinstance(value, np.ndarray):
-        return value.tolist()
+        return jsonable(value.tolist())
     if isinstance(value, np.generic):
-        return value.item()
+        return jsonable(value.item())
     if isinstance(value, complex):
         return {"real": float(value.real), "imag": float(value.imag)}
     if isinstance(value, float) and not np.isfinite(value):
