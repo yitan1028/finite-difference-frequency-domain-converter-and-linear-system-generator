@@ -1,0 +1,75 @@
+# Coordinate-Stretched Frequency-Domain PML
+
+## Scope
+
+The `coordinate_stretched_pml` mode is an opt-in frequency-domain absorbing
+boundary. It coexists with the undamped continuous Helmholtz operator and the
+forward-discrete scalar sponge. It does not change either legacy formulation.
+
+## Harmonic convention and stretch sign
+
+The mode uses
+
+```text
+u(x,z,t) = Re{U(x,z,omega) exp(-i omega t)}.
+```
+
+The directional stretch factors are
+
+```text
+s_x = 1 + i sigma_x / omega,
+s_z = 1 + i sigma_z / omega.
+```
+
+With this convention, an outgoing one-dimensional factor
+`exp(i k s_x x)` contains `exp(-k sigma_x x / omega)` and therefore decays
+for nonnegative `sigma_x`. The implementation records a numerical sign check
+in each system's metadata.
+
+`sigma_x` is nonzero only in the left and right external padding. `sigma_z` is
+nonzero only in the top and bottom padding. Both are exactly zero in the
+physical model and both are active in corners. The profiles are built
+independently, so corner values do not depend on array assignment order.
+
+## Continuous operator
+
+The assembled equation is
+
+```text
+-d/dx[(s_z / s_x) dU/dx]
+-d/dz[(s_x / s_z) dU/dz]
+-omega^2 (s_x s_z / v^2) U
+= Q.
+```
+
+The source is inside the physical domain, where `s_x = s_z = 1`, and is not
+rescaled by PML coefficients. The production source uses the same finite
+forward-Ricker sequence and raw positive-sign DFT coefficients as the scalar
+sponge baseline, so boundary comparisons use the same right-hand side.
+
+## Conservative discretization
+
+The current implementation uses a second-order conservative face-flux
+discretization. This is an explicit accuracy choice; it is not described as the
+project's fourth-order constant-coefficient stencil.
+
+Node-to-face coefficients use arithmetic averaging in both directions:
+
+```text
+K_x = G_x.T diag((s_z / s_x)_x-face) G_x,
+K_z = G_z.T diag((s_x / s_z)_z-face) G_z,
+M_pml = diag(s_x s_z / v^2),
+A_pml = K_x + K_z - omega^2 M_pml.
+```
+
+`G_x` and `G_z` include explicit outer faces connected to zero exterior ghost
+values. No periodic connection or `roll` operation is used. In the zero-profile
+limit, the matrix reduces to the existing second-order zero-exterior Helmholtz
+matrix.
+
+## Output traceability
+
+Coordinate-PML runs export `sigma_x.npy`, `sigma_z.npy`,
+`coordinate_pml_metadata.json`, the resolved config, and per-frequency operator
+metadata. These files record the stretch convention, averaging rule, true
+spatial order, profile extrema, source mapping, and outer-boundary treatment.

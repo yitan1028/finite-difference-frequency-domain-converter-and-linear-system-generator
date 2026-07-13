@@ -66,7 +66,7 @@ Version 1 intentionally has a narrow scope. It does not provide:
 
 - time stepping;
 - finite-difference time-domain (FDTD) simulation;
-- a coordinate-stretched PML or a completed TD/FD boundary validation;
+- a matched time-domain solver or completed TD/FD comparison;
 - the shifted representation `H = M^{-1/2} K M^{-1/2}`;
 - a quantum solve;
 - a computed solution `U_j`;
@@ -137,6 +137,9 @@ The production configurations are:
 - `frequency_domain_converter/configs/first_layered_run_pml30.json`: optimized
   forward-discrete complex sponge with 30 external cells per side, producing
   a 130 x 130 grid.
+- `frequency_domain_converter/configs/first_layered_run_coordinate_pml.json`:
+  coordinate-stretched frequency-domain PML with 30 external cells per side
+  and a conservative second-order face-flux discretization.
 
 Both expect the velocity dataset at `../model2.npy` relative to the
 `frequency_domain_converter/` directory and select `model_index: 0`.
@@ -595,6 +598,37 @@ linear-solver residual as proof of absorbing-boundary accuracy. See the
 consolidated validation report and
 `frequency_domain_converter/docs/forward_compatible_frequency_operator.md`
 for the recurrence and exact derivation.
+
+## Coordinate-stretched PML mode
+
+The opt-in `coordinate_stretched_pml` mode uses independent directional
+profiles and the convention `u = Re{U exp(-i omega t)}`:
+
+```text
+s_x = 1 + i sigma_x / omega
+s_z = 1 + i sigma_z / omega
+
+A = G_x.T diag(s_z / s_x) G_x
+  + G_z.T diag(s_x / s_z) G_z
+  - omega^2 diag(s_x s_z / v^2).
+```
+
+The implementation uses a second-order conservative face-flux discretization
+with arithmetic node-to-face averaging. Run and solve it from the repository
+root:
+
+```bash
+PYTHONPATH=frequency_domain_converter/src python -m fd_converter.cli --config frequency_domain_converter/configs/first_layered_run_coordinate_pml.json
+PYTHONPATH=frequency_domain_converter/src python -m fd_converter.solve_cli --input frequency_domain_converter/outputs/first_layered_run_coordinate_pml
+```
+
+Real-model optimization selected 30 cells per side, power 3, target decay
+`1e-6`, strength scale 1, and maximum-velocity scaling. Physical interior
+errors against a converged 60-cell reference are approximately 0.24%, 0.088%,
+0.026%, and 0.0069% at 5, 10, 15, and 20 Hz; all outer-edge ratios are below
+`4.7e-4`. The result is classified `STRONG SUCCESS`. See
+`frequency_domain_converter/docs/coordinate_stretched_pml.md` for the exact
+formulation.
 
 ## 15. Current validated example
 

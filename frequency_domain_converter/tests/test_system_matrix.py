@@ -7,10 +7,14 @@ import numpy as np
 import scipy.sparse as sp
 
 from fd_converter.assembly import run_conversion
+from fd_converter.operators import assemble_coordinate_stretched_pml_matrix
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = PROJECT_ROOT / "configs" / "first_layered_run.json"
+COORDINATE_PML_CONFIG_PATH = (
+    PROJECT_ROOT / "configs" / "first_layered_run_coordinate_pml.json"
+)
 EXPECTED_FREQUENCIES_HZ = np.array([5.0, 10.0, 15.0, 20.0])
 
 
@@ -23,6 +27,19 @@ def _run_first_layered_conversion(tmp_path: Path):
         "save_velocity_preview": False,
     }
     temporary_config = tmp_path / "first_layered_run.json"
+    temporary_config.write_text(json.dumps(raw), encoding="utf-8")
+    return run_conversion(temporary_config, project_root=PROJECT_ROOT)
+
+
+def _run_coordinate_pml_conversion(tmp_path: Path):
+    raw = json.loads(COORDINATE_PML_CONFIG_PATH.read_text(encoding="utf-8"))
+    raw["output"] = {
+        "directory": str(tmp_path / "first_layered_run_coordinate_pml"),
+        "export_npz": True,
+        "export_mtx": False,
+        "save_velocity_preview": False,
+    }
+    temporary_config = tmp_path / "first_layered_run_coordinate_pml.json"
     temporary_config.write_text(json.dumps(raw), encoding="utf-8")
     return run_conversion(temporary_config, project_root=PROJECT_ROOT)
 
@@ -64,3 +81,33 @@ def test_first_layered_run_system_matrices_and_rhs(tmp_path: Path) -> None:
             rtol=0.0,
             atol=1.0e-12,
         )
+
+    coordinate = _run_coordinate_pml_conversion(tmp_path)
+    assert coordinate.config.frequency_operator.mode == "coordinate_stretched_pml"
+    assert coordinate.padded_domain.physical_shape == (70, 70)
+    assert coordinate.padded_domain.padded_shape == (130, 130)
+    assert np.all(
+        coordinate.padded_domain.sigma_x[
+            coordinate.padded_domain.physical_domain_mask
+        ]
+        == 0.0
+    )
+    assert np.all(
+        coordinate.padded_domain.sigma_z[
+            coordinate.padded_domain.physical_domain_mask
+        ]
+        == 0.0
+    )
+    for system in coordinate.systems:
+        expected_A, _, metadata = assemble_coordinate_stretched_pml_matrix(
+            coordinate.padded_domain.velocity_padded,
+            coordinate.padded_domain.sigma_x,
+            coordinate.padded_domain.sigma_z,
+            system.frequency_hz,
+            coordinate.config.grid.dx_m,
+            coordinate.config.grid.dz_m,
+        )
+        assert _max_abs_sparse(system.A - expected_A) <= 1.0e-12
+        assert np.iscomplexobj(system.A.data)
+        assert metadata["spatial_discretization"] == "conservative_flux_second_order"
+        np.testing.assert_array_equal(system.Q, system.B)

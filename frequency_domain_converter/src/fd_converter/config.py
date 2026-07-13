@@ -13,8 +13,11 @@ SUPPORTED_FREQUENCY_OPERATOR_MODES = {
     "continuous_helmholtz",
     "forward_discrete_damped",
     "forward_discrete_pml",
+    "coordinate_stretched_pml",
 }
 FORWARD_DISCRETE_MODES = {"forward_discrete_damped", "forward_discrete_pml"}
+COORDINATE_PML_MODES = {"coordinate_stretched_pml"}
+SUPPORTED_PML_SPATIAL_DISCRETIZATIONS = {"conservative_flux_second_order"}
 SUPPORTED_DAMPING_PROFILES = {"quadratic", "polynomial"}
 SUPPORTED_DAMPING_VELOCITY_REFERENCES = {"minimum", "maximum"}
 SUPPORTED_DAMPING_CORNER_COMBINATIONS = {
@@ -76,6 +79,7 @@ class FrequencyOperatorConfig:
     mode: str = "continuous_helmholtz"
     dt_s: Optional[float] = None
     harmonic_convention: str = "exp(-i*omega*n*dt)"
+    spatial_discretization: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -177,7 +181,7 @@ def load_config(path: str | Path) -> RunConfig:
 
     frequency_operator = _parse_frequency_operator(raw.get("frequency_operator"))
     source = _parse_source(_require_mapping(raw, "source", "config"))
-    _validate_forward_discrete_contract(
+    _validate_frequency_operator_contract(
         grid=grid,
         boundary=boundary,
         frequency_operator=frequency_operator,
@@ -340,28 +344,70 @@ def _parse_frequency_operator(raw: Any) -> FrequencyOperatorConfig:
     dt_s = raw.get("dt_s")
     if dt_s is not None:
         dt_s = _positive_float_value(dt_s, "frequency_operator.dt_s")
-    convention = raw.get("harmonic_convention", "exp(-i*omega*n*dt)")
-    if convention != "exp(-i*omega*n*dt)":
+    default_convention = (
+        "exp(-i*omega*t)"
+        if mode in COORDINATE_PML_MODES
+        else "exp(-i*omega*n*dt)"
+    )
+    convention = raw.get("harmonic_convention", default_convention)
+    expected_convention = default_convention
+    if convention != expected_convention:
         raise ConfigError(
             "frequency_operator.harmonic_convention must be "
-            "'exp(-i*omega*n*dt)'."
+            f"{expected_convention!r} for mode {mode!r}."
         )
-    if mode in FORWARD_DISCRETE_MODES and dt_s is None:
+    if mode in (FORWARD_DISCRETE_MODES | COORDINATE_PML_MODES) and dt_s is None:
         raise ConfigError(
             f"frequency_operator.mode={mode!r} requires dt_s."
         )
+    spatial_discretization = raw.get("spatial_discretization")
+    if mode in COORDINATE_PML_MODES:
+        spatial_discretization = (
+            spatial_discretization or "conservative_flux_second_order"
+        )
+        if spatial_discretization not in SUPPORTED_PML_SPATIAL_DISCRETIZATIONS:
+            raise ConfigError(
+                "Unsupported frequency_operator.spatial_discretization "
+                f"{spatial_discretization!r}; supported values: "
+                f"{sorted(SUPPORTED_PML_SPATIAL_DISCRETIZATIONS)}."
+            )
+    elif spatial_discretization is not None:
+        raise ConfigError(
+            "frequency_operator.spatial_discretization is only valid for "
+            "coordinate_stretched_pml."
+        )
     return FrequencyOperatorConfig(
-        mode=mode, dt_s=dt_s, harmonic_convention=convention
+        mode=mode,
+        dt_s=dt_s,
+        harmonic_convention=convention,
+        spatial_discretization=spatial_discretization,
     )
 
 
-def _validate_forward_discrete_contract(
+def _validate_frequency_operator_contract(
     *,
     grid: GridConfig,
     boundary: BoundaryConfig,
     frequency_operator: FrequencyOperatorConfig,
     source: SourceConfig,
 ) -> None:
+    if frequency_operator.mode in COORDINATE_PML_MODES:
+        if boundary.type != "forward_compatible_padding":
+            raise ConfigError(
+                "coordinate_stretched_pml requires "
+                "boundary.type='forward_compatible_padding'."
+            )
+        if grid.spatial_order != 2:
+            raise ConfigError(
+                "coordinate_stretched_pml currently uses an explicit second-order "
+                "conservative flux discretization; set grid.spatial_order=2."
+            )
+        if source.type != "forward_time_ricker_dft":
+            raise ConfigError(
+                "coordinate_stretched_pml requires "
+                "source.type='forward_time_ricker_dft' for baseline-comparable RHS."
+            )
+        return
     if frequency_operator.mode not in FORWARD_DISCRETE_MODES:
         if source.type == "forward_time_ricker_dft":
             raise ConfigError(

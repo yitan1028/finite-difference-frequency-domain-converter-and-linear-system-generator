@@ -33,6 +33,8 @@ class PaddedDomain:
     physical_domain_mask: np.ndarray
     padding_mask: np.ndarray
     damping_profile: np.ndarray
+    sigma_x: np.ndarray
+    sigma_z: np.ndarray
     padding: PaddingWidths
     physical_z_slice: slice
     physical_x_slice: slice
@@ -82,7 +84,7 @@ def build_padded_domain(
     physical_mask[z_slice, x_slice] = True
     padding_mask = ~physical_mask
 
-    damping, side_maxima, damping_design = build_damping_profile(
+    damping, sigma_x, sigma_z, side_maxima, damping_design = build_damping_profile(
         physical,
         padded.shape,
         widths,
@@ -104,6 +106,8 @@ def build_padded_domain(
         physical_domain_mask=physical_mask,
         padding_mask=padding_mask,
         damping_profile=damping,
+        sigma_x=sigma_x,
+        sigma_z=sigma_z,
         padding=widths,
         physical_z_slice=z_slice,
         physical_x_slice=x_slice,
@@ -121,7 +125,13 @@ def build_damping_profile(
     dx_m: float,
     dz_m: float,
     boundary: BoundaryConfig,
-) -> tuple[np.ndarray, dict[str, float], dict[str, object]]:
+) -> tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    dict[str, float],
+    dict[str, object],
+]:
     """Build the configured scalar damping profile on the padded grid."""
     velocity_reference = _resolve_velocity_reference(
         velocity_physical, boundary.damping.velocity_reference
@@ -163,6 +173,9 @@ def build_damping_profile(
         side_maxima["right"] = float(np.max(right))
     else:
         side_maxima["right"] = 0.0
+    sigma_x = np.broadcast_to(x_damping[None, :], padded_shape).copy()
+    sigma_z = np.broadcast_to(z_damping[:, None], padded_shape).copy()
+
     if boundary.damping.corner_combination == "forward_x_overwrite":
         damping = np.repeat(z_damping[:, None], padded_shape[1], axis=1)
         if widths.left:
@@ -198,7 +211,7 @@ def build_damping_profile(
             ),
         },
     }
-    return damping, side_maxima, damping_design
+    return damping, sigma_x, sigma_z, side_maxima, damping_design
 
 
 def build_forward_reference_damping(
