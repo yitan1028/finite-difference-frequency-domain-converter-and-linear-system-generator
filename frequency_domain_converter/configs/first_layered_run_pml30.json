@@ -1,5 +1,5 @@
 {
-  "run_name": "first_layered_run_pml20",
+  "run_name": "first_layered_run_pml30",
   "input": {
     "velocity_file": "../model2.npy",
     "model_index": 0
@@ -22,17 +22,17 @@
   ],
   "boundary": {
     "type": "forward_compatible_padding",
-    "top_padding_cells": 20,
-    "bottom_padding_cells": 20,
-    "left_padding_cells": 20,
-    "right_padding_cells": 20,
+    "top_padding_cells": 30,
+    "bottom_padding_cells": 30,
+    "left_padding_cells": 30,
+    "right_padding_cells": 30,
     "damping": {
       "profile": "polynomial",
       "power": 3.0,
       "target_decay": 1e-6,
-      "strength_scale": 4.0,
+      "strength_scale": 2.0,
       "velocity_reference": "maximum",
-      "corner_combination": "sum"
+      "corner_combination": "maximum"
     }
   },
   "source": {
@@ -60,7 +60,7 @@
     ]
   },
   "output": {
-    "directory": "outputs/first_layered_run_pml20",
+    "directory": "outputs/first_layered_run_pml30",
     "export_npz": true,
     "export_mtx": false,
     "save_velocity_preview": true

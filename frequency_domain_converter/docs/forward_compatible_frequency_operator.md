@@ -156,7 +156,7 @@ corrected zero-exterior outer edge and the same saved damping array.
 
 ## Production polynomial profile
 
-The production PML20 configuration retains the scalar damping recurrence
+The optimized production PML30 configuration retains the scalar damping recurrence
 above but uses a configurable polynomial profile on each side:
 
 ```text

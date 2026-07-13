@@ -134,9 +134,9 @@ The production configurations are:
 
 - `frequency_domain_converter/configs/first_layered_run.json`: unchanged
   undamped continuous-Helmholtz baseline on the physical 70 x 70 grid;
-- `frequency_domain_converter/configs/first_layered_run_pml20.json`: opt-in
-  forward-discrete complex system with 20 external cells per side, producing
-  a 110 x 110 grid.
+- `frequency_domain_converter/configs/first_layered_run_pml30.json`: optimized
+  forward-discrete complex sponge with 30 external cells per side, producing
+  a 130 x 130 grid.
 
 Both expect the velocity dataset at `../model2.npy` relative to the
 `frequency_domain_converter/` directory and select `model_index: 0`.
@@ -549,17 +549,17 @@ continuous Helmholtz formulation. The production configuration uses:
   },
   "boundary": {
     "type": "forward_compatible_padding",
-    "top_padding_cells": 20,
-    "bottom_padding_cells": 20,
-    "left_padding_cells": 20,
-    "right_padding_cells": 20,
+    "top_padding_cells": 30,
+    "bottom_padding_cells": 30,
+    "left_padding_cells": 30,
+    "right_padding_cells": 30,
     "damping": {
       "profile": "polynomial",
       "power": 3.0,
       "target_decay": 1e-6,
-      "strength_scale": 4.0,
+      "strength_scale": 2.0,
       "velocity_reference": "maximum",
-      "corner_combination": "sum"
+      "corner_combination": "maximum"
     }
   },
   "source": {
@@ -576,8 +576,8 @@ its raw positive-sign DFT coefficients, matrix real/imaginary diagnostics,
 and complete transform metadata. Run and solve it from the repository root:
 
 ```bash
-PYTHONPATH=frequency_domain_converter/src python -m fd_converter.cli --config frequency_domain_converter/configs/first_layered_run_pml20.json
-PYTHONPATH=frequency_domain_converter/src python -m fd_converter.solve_cli --input frequency_domain_converter/outputs/first_layered_run_pml20
+PYTHONPATH=frequency_domain_converter/src python -m fd_converter.cli --config frequency_domain_converter/configs/first_layered_run_pml30.json
+PYTHONPATH=frequency_domain_converter/src python -m fd_converter.solve_cli --input frequency_domain_converter/outputs/first_layered_run_pml30
 ```
 
 Run the real-model reflection validation from the converter directory:
@@ -587,10 +587,12 @@ cd frequency_domain_converter
 python tests/pml_reflection/run_reflection_validation.py --mode final
 ```
 
-The current 20-cell scalar damping result solves accurately but does not meet
-all reflection targets against the 60-cell practical reference, especially at
-5 and 10 Hz. Do not interpret the small linear-solver residual as proof of
-absorbing-boundary accuracy. See the generated PML20 summary and
+Autonomous optimization selected 30 cells, power 3, strength scale 2, and
+maximum corner combination against a converged 100-cell reference. This is a
+large improvement over the original 20-cell case, but it still does not meet
+the practical reflection targets at 5 and 10 Hz. Do not interpret the small
+linear-solver residual as proof of absorbing-boundary accuracy. See the
+consolidated validation report and
 `frequency_domain_converter/docs/forward_compatible_frequency_operator.md`
 for the recurrence and exact derivation.
 
