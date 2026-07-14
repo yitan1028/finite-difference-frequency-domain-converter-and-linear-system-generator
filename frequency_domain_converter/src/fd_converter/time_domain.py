@@ -43,6 +43,9 @@ class MatchedTDResult:
     source_time_signal: np.ndarray
     receiver_traces: np.ndarray
     receiver_flat_indices: np.ndarray
+    physical_wavefield_history: np.ndarray | None
+    physical_frequency_coefficients: np.ndarray | None
+    snapshots: dict[float, np.ndarray]
     snapshot_paths: list[Path]
     metrics: dict[str, Any]
 
@@ -202,6 +205,11 @@ def run_matched_time_domain(
     *,
     output_dir: str | Path | None = None,
     total_time_s: float | None = None,
+    dt_s: float | None = None,
+    source_time_signal: np.ndarray | None = None,
+    snapshot_times_s: tuple[float, ...] | list[float] | None = None,
+    capture_physical_history: bool = False,
+    analysis_frequencies_hz: np.ndarray | list[float] | tuple[float, ...] | None = None,
     save_outputs: bool = True,
 ) -> MatchedTDResult:
     config = load_matched_td_config(config_path)
@@ -221,15 +229,20 @@ def run_matched_time_domain(
         fd_config.frequency_operator.dt_s, fd_dt_s, rel_tol=0.0, abs_tol=1.0e-15
     ):
         raise ValueError("Referenced FD config and output package use different dt_s.")
-    if not math.isclose(config.dt_s, fd_dt_s, rel_tol=0.0, abs_tol=1.0e-15):
+    selected_dt_s = float(dt_s if dt_s is not None else config.dt_s)
+    if selected_dt_s <= 0.0:
+        raise ValueError("dt_s must be positive.")
+    if source_time_signal is None and not math.isclose(
+        selected_dt_s, fd_dt_s, rel_tol=0.0, abs_tol=1.0e-15
+    ):
         raise ValueError(
-            "Matched TD dt_s must equal the dt used to construct the FD source."
+            "A dt_s different from the FD source requires source_time_signal."
         )
     duration = float(total_time_s if total_time_s is not None else config.total_time_s)
     if duration <= 0.0:
         raise ValueError("total_time_s must be positive.")
-    nt = int(round(duration / config.dt_s)) + 1
-    time_axis = np.arange(nt, dtype=np.float64) * config.dt_s
+    nt = int(round(duration / selected_dt_s)) + 1
+    time_axis = np.arange(nt, dtype=np.float64) * selected_dt_s
 
     velocity = np.load(package_dir / "velocity_padded.npy", allow_pickle=False)
     sigma_x = np.load(package_dir / "sigma_x.npy", allow_pickle=False)
@@ -240,7 +253,13 @@ def run_matched_time_domain(
     padding_mask = np.load(package_dir / "padding_mask.npy", allow_pickle=False).astype(
         bool
     )
-    source_input = np.load(package_dir / "source_time_signal.npy", allow_pickle=False)
+    source_input = (
+        np.asarray(source_time_signal, dtype=np.float64)
+        if source_time_signal is not None
+        else np.load(package_dir / "source_time_signal.npy", allow_pickle=False)
+    )
+    if source_input.ndim != 1:
+        raise ValueError("source_time_signal must be one-dimensional.")
     source_signal = np.zeros(nt, dtype=np.float64)
     source_count = min(nt, source_input.size)
     source_signal[:source_count] = source_input[:source_count]
@@ -276,10 +295,36 @@ def run_matched_time_domain(
     max_padding = np.empty(nt, dtype=np.float64)
     max_outer = np.empty(nt, dtype=np.float64)
     peak_amplitude_grid = np.zeros((nz, nx), dtype=np.float64)
+    physical_shape = (
+        physical_slices[0].stop - physical_slices[0].start,
+        physical_slices[1].stop - physical_slices[1].start,
+    )
+    physical_history = (
+        np.empty((nt, *physical_shape), dtype=np.float64)
+        if capture_physical_history
+        else None
+    )
+    analysis_frequencies = (
+        np.asarray(analysis_frequencies_hz, dtype=np.float64)
+        if analysis_frequencies_hz is not None
+        else np.empty(0, dtype=np.float64)
+    )
+    if analysis_frequencies.ndim != 1 or np.any(analysis_frequencies < 0.0):
+        raise ValueError("analysis_frequencies_hz must be a nonnegative 1D array.")
+    physical_frequency_coefficients = (
+        np.zeros((analysis_frequencies.size, *physical_shape), dtype=np.complex128)
+        if analysis_frequencies.size
+        else None
+    )
+    selected_snapshot_times = (
+        tuple(float(value) for value in snapshot_times_s)
+        if snapshot_times_s is not None
+        else config.snapshot_times_s
+    )
     snapshot_indices = {
-        int(round(value / config.dt_s)): value
-        for value in config.snapshot_times_s
-        if value <= time_axis[-1] + 0.5 * config.dt_s
+        int(round(value / selected_dt_s)): value
+        for value in selected_snapshot_times
+        if 0.0 <= value <= time_axis[-1] + 0.5 * selected_dt_s
     }
     snapshots: dict[int, np.ndarray] = {}
     outer_mask = np.zeros((nz, nx), dtype=bool)
@@ -290,6 +335,13 @@ def run_matched_time_domain(
     finite = True
     for index, current_time in enumerate(time_axis):
         pressure = state.pressure
+        if physical_history is not None:
+            physical_history[index, :, :] = pressure[physical_slices]
+        if physical_frequency_coefficients is not None:
+            phase = np.exp(1j * 2.0 * np.pi * analysis_frequencies * current_time)
+            physical_frequency_coefficients += (
+                phase[:, None, None] * pressure[physical_slices][None, :, :]
+            )
         receiver_traces[index, :] = pressure.ravel(order="C")[receiver_indices]
         magnitude = np.abs(pressure)
         np.maximum(peak_amplitude_grid, magnitude, out=peak_amplitude_grid)
@@ -303,17 +355,17 @@ def run_matched_time_domain(
             break
         if index == nt - 1:
             continue
-        source_0 = _source_at(source_input, current_time, config.dt_s)
+        source_0 = _source_at(source_input, current_time, selected_dt_s)
         source_half = _source_at(
-            source_input, current_time + 0.5 * config.dt_s, config.dt_s
+            source_input, current_time + 0.5 * selected_dt_s, selected_dt_s
         )
         source_1 = _source_at(
-            source_input, current_time + config.dt_s, config.dt_s
+            source_input, current_time + selected_dt_s, selected_dt_s
         )
         state = _rk4_step(
             system,
             state,
-            config.dt_s,
+            selected_dt_s,
             source_0,
             source_half,
             source_1,
@@ -325,9 +377,9 @@ def run_matched_time_domain(
     dx_m = float(resolved["dx_m"])
     dz_m = float(resolved["dz_m"])
     velocity_max = float(np.max(velocity))
-    cfl = velocity_max * config.dt_s * math.sqrt(dx_m**-2 + dz_m**-2)
+    cfl = velocity_max * selected_dt_s * math.sqrt(dx_m**-2 + dz_m**-2)
     rk4_wave_stability_fraction = 2.0 * cfl / (2.0 * math.sqrt(2.0))
-    sigma_dt_max = float(max(np.max(sigma_x), np.max(sigma_z)) * config.dt_s)
+    sigma_dt_max = float(max(np.max(sigma_x), np.max(sigma_z)) * selected_dt_s)
     source_end_index = int(np.max(np.flatnonzero(source_signal != 0.0)))
     late_start = max(source_end_index + 1, int(0.8 * nt))
     trace_energy = float(np.linalg.norm(receiver_traces))
@@ -338,7 +390,7 @@ def run_matched_time_domain(
     diagnostics = {
         "finite": True,
         "runtime_seconds": float(runtime_seconds),
-        "dt_s": config.dt_s,
+        "dt_s": selected_dt_s,
         "nt": nt,
         "total_time_s": float(time_axis[-1]),
         "velocity_max_m_s": velocity_max,
@@ -360,16 +412,15 @@ def run_matched_time_domain(
         "pml_outer_to_interface_peak_ratio": _safe_ratio(
             float(pml_peak_by_depth[-1]), float(pml_peak_by_depth[0])
         ),
-        "source_end_time_s": float(source_end_index * config.dt_s),
+        "source_end_time_s": float(source_end_index * selected_dt_s),
         "physical_sigma_exactly_zero": bool(
             np.all(sigma_x[physical_mask] == 0.0)
             and np.all(sigma_z[physical_mask] == 0.0)
         ),
         "padded_shape": [nz, nx],
-        "physical_shape": [
-            physical_slices[0].stop - physical_slices[0].start,
-            physical_slices[1].stop - physical_slices[1].start,
-        ],
+        "physical_shape": list(physical_shape),
+        "physical_history_captured": capture_physical_history,
+        "analysis_frequencies_hz": analysis_frequencies.tolist(),
         "source_flat_index": source_flat_index,
         "receiver_flat_indices": receiver_indices.tolist(),
         "receiver_trace_shape": list(receiver_traces.shape),
@@ -388,6 +439,9 @@ def run_matched_time_domain(
         else config.output_directory
     )
     snapshot_paths: list[Path] = []
+    snapshots_by_time = {
+        float(time_axis[index]): snapshot for index, snapshot in snapshots.items()
+    }
     if save_outputs:
         selected_output.mkdir(parents=True, exist_ok=True)
         snapshots_dir = selected_output / "snapshots"
@@ -437,6 +491,9 @@ def run_matched_time_domain(
         source_time_signal=source_signal,
         receiver_traces=receiver_traces,
         receiver_flat_indices=receiver_indices,
+        physical_wavefield_history=physical_history,
+        physical_frequency_coefficients=physical_frequency_coefficients,
+        snapshots=snapshots_by_time,
         snapshot_paths=snapshot_paths,
         metrics=diagnostics,
     )
