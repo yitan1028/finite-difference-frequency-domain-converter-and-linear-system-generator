@@ -1,0 +1,11 @@
+{
+  "run_name": "first_layered_run_matched_td",
+  "frequency_domain_config": "configs/first_layered_run_coordinate_pml.json",
+  "frequency_domain_output": "outputs/first_layered_run_coordinate_pml",
+  "time_domain": {
+    "dt_s": 0.001,
+    "total_time_s": 2.0,
+    "snapshot_times_s": [0.1, 0.2, 0.4, 0.8, 1.2, 2.0],
+    "output_directory": "outputs/first_layered_run_matched_td"
+  }
+}

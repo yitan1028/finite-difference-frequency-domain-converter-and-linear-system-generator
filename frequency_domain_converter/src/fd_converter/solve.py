@@ -35,6 +35,8 @@ RELATIVE_RESIDUAL_TOLERANCE = 1.0e-9
 class LinearSolveResult:
     U: np.ndarray
     U_grid: np.ndarray
+    U_physical: np.ndarray
+    receiver_values: np.ndarray
     residual_vector: np.ndarray
     metrics: dict[str, Any]
 
@@ -58,6 +60,8 @@ def solve_sparse_system(
     source_nonzero_indices: list[int] | None = None,
     physical_domain_mask: np.ndarray | None = None,
     padding_mask: np.ndarray | None = None,
+    physical_domain_slices: tuple[slice, slice] | None = None,
+    receiver_flat_indices: list[int] | None = None,
     relative_residual_tolerance: float = RELATIVE_RESIDUAL_TOLERANCE,
 ) -> LinearSolveResult:
     """Solve one sparse system and compute solver-independent residual metrics."""
@@ -82,6 +86,12 @@ def solve_sparse_system(
 
     U = np.asarray(solution_vector).reshape((n, 1))
     U_grid = U[:, 0].reshape((nz, nx), order="C")
+    z_slice, x_slice = physical_domain_slices or (slice(0, nz), slice(0, nx))
+    U_physical = np.asarray(U_grid[z_slice, x_slice])
+    receiver_indices = np.asarray(receiver_flat_indices or [], dtype=np.int64)
+    if np.any(receiver_indices < 0) or np.any(receiver_indices >= n):
+        raise ValueError("receiver_flat_indices contains an index outside A.")
+    receiver_values = np.asarray(U[receiver_indices, 0], dtype=U.dtype)
     residual_vector = np.asarray(matrix @ U - rhs)
 
     residual_norm = float(np.linalg.norm(residual_vector))
@@ -110,6 +120,10 @@ def solve_sparse_system(
         "rhs_shape": list(rhs.shape),
         "solution_shape": list(U.shape),
         "solution_grid_shape": list(U_grid.shape),
+        "physical_solution_shape": list(U_physical.shape),
+        "receiver_values_shape": list(receiver_values.shape),
+        "receiver_flat_indices": receiver_indices.tolist(),
+        "receiver_values_dtype": str(receiver_values.dtype),
         "solver_name": SOLVER_NAME,
         "solve_time_seconds": float(solve_time_seconds),
         "solution_finite": solution_is_finite,
@@ -150,6 +164,8 @@ def solve_sparse_system(
     return LinearSolveResult(
         U=U,
         U_grid=U_grid,
+        U_physical=U_physical,
+        receiver_values=receiver_values,
         residual_vector=residual_vector,
         metrics=metrics,
     )
@@ -184,6 +200,8 @@ def run_solver(
         package_dir / "physical_domain_mask.npy", (nz, nx)
     )
     padding_mask = _load_optional_mask(package_dir / "padding_mask.npy", (nz, nx))
+    physical_domain_slices = _physical_domain_slices(resolved, nz=nz, nx=nx)
+    receiver_flat_indices = _receiver_flat_indices(resolved, n=n)
 
     system_specs = _system_specs(package_dir, manifest)
     if not system_specs:
@@ -241,6 +259,8 @@ def run_solver(
                 nx=nx,
                 physical_domain_mask=physical_domain_mask,
                 padding_mask=padding_mask,
+                physical_domain_slices=physical_domain_slices,
+                receiver_flat_indices=receiver_flat_indices,
                 relative_residual_tolerance=relative_residual_tolerance,
             )
         except Exception as exc:  # Keep the run report complete across frequencies.
@@ -312,6 +332,12 @@ def run_solver(
                 "directory": f"frequency_solutions/{item['directory_name']}",
                 "U": f"frequency_solutions/{item['directory_name']}/U.npy",
                 "U_grid": f"frequency_solutions/{item['directory_name']}/U_grid.npy",
+                "U_physical": (
+                    f"frequency_solutions/{item['directory_name']}/U_physical.npy"
+                ),
+                "receiver_values": (
+                    f"frequency_solutions/{item['directory_name']}/receiver_values.npy"
+                ),
                 "residual_vector": (
                     f"frequency_solutions/{item['directory_name']}/residual_vector.npy"
                 ),
@@ -353,6 +379,8 @@ def _solve_frequency(
     nx: int,
     physical_domain_mask: np.ndarray | None,
     padding_mask: np.ndarray | None,
+    physical_domain_slices: tuple[slice, slice],
+    receiver_flat_indices: list[int],
     relative_residual_tolerance: float,
 ) -> dict[str, Any]:
     A = sp.load_npz(spec["A_path"])
@@ -373,11 +401,15 @@ def _solve_frequency(
         source_nonzero_indices=source_indices,
         physical_domain_mask=physical_domain_mask,
         padding_mask=padding_mask,
+        physical_domain_slices=physical_domain_slices,
+        receiver_flat_indices=receiver_flat_indices,
         relative_residual_tolerance=relative_residual_tolerance,
     )
 
     np.save(output_dir / "U.npy", result.U)
     np.save(output_dir / "U_grid.npy", result.U_grid)
+    np.save(output_dir / "U_physical.npy", result.U_physical)
+    np.save(output_dir / "receiver_values.npy", result.receiver_values)
     np.save(output_dir / "residual_vector.npy", result.residual_vector)
 
     metrics = {
@@ -397,6 +429,8 @@ def _solve_frequency(
         ),
         "U_output_file": str(output_dir / "U.npy"),
         "U_grid_output_file": str(output_dir / "U_grid.npy"),
+        "U_physical_output_file": str(output_dir / "U_physical.npy"),
+        "receiver_values_output_file": str(output_dir / "receiver_values.npy"),
         "residual_output_file": str(output_dir / "residual_vector.npy"),
         **result.metrics,
     }
@@ -615,12 +649,16 @@ def _frequency_report_text(
         "",
         f"U.npy: {output_dir / 'U.npy'}",
         f"U_grid.npy: {output_dir / 'U_grid.npy'}",
+        f"U_physical.npy: {output_dir / 'U_physical.npy'}",
+        f"receiver_values.npy: {output_dir / 'receiver_values.npy'}",
         f"Residual vector: {output_dir / 'residual_vector.npy'}",
         "",
         f"A shape: {metrics.get('A_shape')}",
         f"RHS shape: {metrics.get('rhs_shape')}",
         f"Solution shape: {metrics.get('solution_shape')}",
         f"Solution grid shape: {metrics.get('solution_grid_shape')}",
+        f"Physical solution shape: {metrics.get('physical_solution_shape')}",
+        f"Receiver values shape: {metrics.get('receiver_values_shape')}",
         f"Solution finite: {_yes_no(bool(metrics.get('solution_finite')))}",
         f"Residual norm (2): {metrics.get('residual_norm_2')}",
         f"RHS norm (2): {metrics.get('rhs_norm_2')}",
@@ -797,6 +835,46 @@ def _load_optional_mask(path: Path, expected_shape: tuple[int, int]) -> np.ndarr
             f"Mask {path} has shape {mask.shape}, expected {expected_shape}."
         )
     return mask
+
+
+def _physical_domain_slices(
+    resolved: dict[str, Any], *, nz: int, nx: int
+) -> tuple[slice, slice]:
+    raw = resolved.get("physical_domain_slices")
+    if raw is None:
+        return slice(0, nz), slice(0, nx)
+    if not isinstance(raw, dict):
+        raise ValueError("physical_domain_slices must be a JSON object.")
+    z = raw.get("z")
+    x = raw.get("x")
+    if not (
+        isinstance(z, list)
+        and len(z) == 2
+        and isinstance(x, list)
+        and len(x) == 2
+    ):
+        raise ValueError("physical_domain_slices must contain two-element x and z lists.")
+    z0, z1 = int(z[0]), int(z[1])
+    x0, x1 = int(x[0]), int(x[1])
+    if not (0 <= z0 < z1 <= nz and 0 <= x0 < x1 <= nx):
+        raise ValueError("physical_domain_slices lies outside the padded grid.")
+    return slice(z0, z1), slice(x0, x1)
+
+
+def _receiver_flat_indices(resolved: dict[str, Any], *, n: int) -> list[int]:
+    mappings = resolved.get("receiver_mappings", [])
+    if not isinstance(mappings, list):
+        raise ValueError("receiver_mappings must be a JSON list.")
+    indices: list[int] = []
+    for mapping in mappings:
+        try:
+            index = int(mapping["padded_index"]["flat_index"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("Invalid padded receiver mapping in resolved config.") from exc
+        if not 0 <= index < n:
+            raise ValueError(f"Receiver flat index {index} lies outside [0, {n - 1}].")
+        indices.append(index)
+    return indices
 
 
 def _region_amplitude_metrics(
