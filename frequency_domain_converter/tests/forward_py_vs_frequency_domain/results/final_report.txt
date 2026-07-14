@@ -1,0 +1,101 @@
+====================================================================================================
+Independent actual forward.py vs Frequency-Domain Benchmark
+====================================================================================================
+
+1. Original solver identity
+- selected path: /Users/tansheng/research/quantum coding/frequency domain linear system generator/forward.py
+- original pre-hook SHA-256: 6ca185eeacf303de922d4c94b49bfd0f95024ac33e2b94b1057e434bcf47d628
+- current hook-version SHA-256: 8196ffa2f15475158a96271091717071f956b0efe45e24135c6f988de5db0c72
+- byte-identical adjacent original: False
+- default-output bitwise equivalence: {'array_equal': True, 'maximum_absolute_difference': 0.0, 'test_shape': [1, 1, 160, 4], 'test_description': 'Unmodified adjacent original and repository-root hook version were run with identical float32 velocity and default snapshot_callback=None.'}
+- actual forward.py used directly: YES
+- custom matched time_domain.py used: NO
+- snapshot hook: Optional snapshot_callback added to FWM; default None and verified to leave the original returned receiver array bitwise unchanged.
+
+2. Common physical problem
+- model index: 0
+- velocity shape/range: [70, 70], 1565.000-4187.000 m/s
+- dx, dz: 10.0 m, 10.0 m
+- source (iz, ix): [7, 35]
+- receivers (iz, ix): [[1, 0], [1, 10], [1, 20], [1, 30], [1, 40], [1, 50], [1, 60], [1, 69]]
+- source f0/delay: 10.0 Hz / 0.110000 s
+- dt, N, DFT period: 0.001 s, 1000, 1.0 s
+
+3. Intentionally retained independent differences
+- forward_spatial_discretization: fourth-order axis-aligned stencil
+- frequency_spatial_discretization: second-order conservative face flux
+- forward_boundary: original 120-cell quadratic scalar sponge with torch.roll outer edge
+- frequency_boundary: production 30-cell coordinate-stretched PML with zero exterior ghost faces
+- comparison_region: only the original 70 x 70 physical velocity-map region
+
+4. Source scaling and Fourier audit
+- forward injection: (v*dt)^2 * s_n at the padded source
+- row scaling: multiply recurrence by V^-2 / dt^2
+- FD RHS: S_k * e_p, with S_k = sum_n s_n exp(+i*omega_k*n*dt)
+- deterministic scale factor: 1.0
+- post-hoc amplitude fit: False
+- output time alignment: exp(-i*omega*dt) applied because forward.py returns p_(n+1) after source sample s_n; this is time-index alignment, not amplitude fitting
+
+5. Receiver metrics
+- aggregate trace relative L2 error: 9.075142e-02
+- mean/worst receiver error: 9.796795e-02 / 1.645410e-01
+- minimum/mean Pearson correlation: 0.986757 / 0.994327
+- maximum arrival-time difference: 1.000000e-03 s
+- r0 (1,0): L2=1.645410e-01, shape=1.627515e-01, corr=0.986757, arrival_delta=0.000000e+00 s, peak_delta=3.415021e-02
+- r1 (1,10): L2=1.224906e-01, shape=1.201328e-01, corr=0.992785, arrival_delta=0.000000e+00 s, peak_delta=3.404471e-02
+- r2 (1,20): L2=6.782886e-02, shape=6.397362e-02, corr=0.997955, arrival_delta=0.000000e+00 s, peak_delta=3.457495e-02
+- r3 (1,30): L2=3.874535e-02, shape=3.054799e-02, corr=0.999534, arrival_delta=1.000000e-03 s, peak_delta=3.290030e-02
+- r4 (1,40): L2=3.874227e-02, shape=3.054542e-02, corr=0.999534, arrival_delta=1.000000e-03 s, peak_delta=3.290232e-02
+- r5 (1,50): L2=6.782480e-02, shape=6.396946e-02, corr=0.997955, arrival_delta=0.000000e+00 s, peak_delta=3.457466e-02
+- r6 (1,60): L2=1.224878e-01, shape=1.201308e-01, corr=0.992785, arrival_delta=0.000000e+00 s, peak_delta=3.404450e-02
+- r7 (1,69): L2=1.610829e-01, shape=1.593171e-01, corr=0.987310, arrival_delta=0.000000e+00 s, peak_delta=3.412452e-02
+
+6. Wavefield snapshots
+- shortly_after_source_emission t=0.121s: L2=4.060254e-02, corr=0.999383, max_abs=4.196559e+00, wavefront_delta=-0.529 m
+- before_first_physical_boundary_interaction t=0.151s: L2=3.388424e-02, corr=0.999501, max_abs=2.597027e+00, wavefront_delta=-1.052 m
+- after_internal_structure_interaction t=0.184s: L2=4.254883e-02, corr=0.999163, max_abs=5.726804e-01, wavefront_delta=-2.144 m
+- near_first_physical_boundary_interaction t=0.156s: L2=3.448442e-02, corr=0.999489, max_abs=2.316073e+00, wavefront_delta=-0.988 m
+- late_time t=0.343s: L2=9.039003e-02, corr=0.996377, max_abs=1.033543e+00, wavefront_delta=-4.850 m
+
+7. Early/middle/late physical-region comparison
+- early_pre_boundary (0.001-0.156s): L2=3.651971e-02, corr=0.999442, max_abs=5.508139e+00
+- middle_propagation (0.157-0.650s): L2=7.162524e-02, corr=0.997592, max_abs=2.230978e+00
+- late_post_boundary (0.651-1.000s): L2=7.791133e-01, corr=0.633437, max_abs=1.885180e-01
+
+8. Boundary diagnostics
+- forward_final_physical_to_peak_ratio: 0.0035883394302902443
+- forward_late_physical_energy_ratio: 0.00010442671228209391
+- forward_outer_edge_to_physical_peak_ratio: 0.03498285367566723
+- fd_final_physical_to_peak_ratio: 9.409661721603455e-05
+- fd_late_physical_energy_ratio: 6.793040233574042e-06
+- fd_outer_edge_to_physical_peak_ratio: 0.00016341127674163113
+- forward_physical_peak: 44.91128158569336
+- approximate_first_physical_boundary_time_s: 0.156
+- forward_max_physical_boundary_to_physical_peak_ratio: 0.26294050915369566
+- fd_max_physical_boundary_to_physical_peak_ratio: 0.2411053173317764
+- late_physical_absolute_error_to_forward_peak_ratio: 0.00419756408060142
+- forward_late_return_small_inside_physical_region: True
+- fd_late_return_small_inside_physical_region: True
+- late_time_interpretation: The forward scalar sponge has more outer-edge activity than the coordinate PML, but both have small late energy inside the physical region. The large late relative error occurs after the field is nearly zero; its absolute error is reported relative to the forward peak.
+
+9. Autonomous corrections
+- round 1 / output time indexing: {'round': 1, 'category': 'output time indexing', 'symptom': 'The first complete reconstruction placed the FD state on p_n while forward.py records the pressure newly computed by loop n.', 'diagnosis': 'The original recurrence is p_(n+1)=L p_n-p_(n-1)+(v*dt)^2 s_n; therefore its returned loop-n sample is p_(n+1).', 'correction': 'Applied the exactly derived positive-DFT phase exp(-i*omega*dt), equivalent to observing the FD state one sample later.', 'evidence': {'best_lag_samples': -3, 'errors_by_lag': {'-3': 0.2313834239623653, '-2': 0.2616926684071289, '-1': 0.3190504113975581, '0': 0.3909471939085739, '1': 0.4698618186146081, '2': 0.5518384021412914, '3': 0.6347138052679153}, 'relative_error_improvement': 0.1595637699462086}}
+- round 2 / well-resolved common source band: {'round': 2, 'category': 'well-resolved common source band', 'symptom': 'The 15 Hz source produced aggregate receiver error 3.190504e-01; frequency error and phase mismatch increased monotonically above 10 Hz.', 'diagnosis': 'The broad 15 Hz Ricker spectrum places substantial energy above 20 Hz, where the retained second-order and fourth-order spatial schemes have different numerical dispersion.', 'correction': 'Changed the shared source center frequency to 10 Hz, within the requested 10-15 Hz well-resolved range; both independent solvers used the new exact same sequence.', 'result': 'Aggregate receiver error became 9.075142e-02.'}
+
+10. Final acceptance
+- PRACTICAL AGREEMENT WITH EXPLAINED NUMERICAL DIFFERENCES
+
+11. Direct conclusion
+- Yes. The frequency-domain linear-system reconstruction reproduces the main wave arrivals and propagation structure generated by the independent actual forward.py solver inside the original 70 x 70 physical region.
+
+12. Final plots
+- /Users/tansheng/research/quantum coding/frequency domain linear system generator/frequency_domain_converter/tests/forward_py_vs_frequency_domain/results/plots/velocity_and_geometry.png
+- /Users/tansheng/research/quantum coding/frequency domain linear system generator/frequency_domain_converter/tests/forward_py_vs_frequency_domain/results/plots/receiver_trace_overlay.png
+- /Users/tansheng/research/quantum coding/frequency domain linear system generator/frequency_domain_converter/tests/forward_py_vs_frequency_domain/results/plots/receiver_gather_comparison.png
+- /Users/tansheng/research/quantum coding/frequency domain linear system generator/frequency_domain_converter/tests/forward_py_vs_frequency_domain/results/plots/wavefield_shortly_after_source_emission_0.121s.png
+- /Users/tansheng/research/quantum coding/frequency domain linear system generator/frequency_domain_converter/tests/forward_py_vs_frequency_domain/results/plots/wavefield_before_first_physical_boundary_interaction_0.151s.png
+- /Users/tansheng/research/quantum coding/frequency domain linear system generator/frequency_domain_converter/tests/forward_py_vs_frequency_domain/results/plots/wavefield_after_internal_structure_interaction_0.184s.png
+- /Users/tansheng/research/quantum coding/frequency domain linear system generator/frequency_domain_converter/tests/forward_py_vs_frequency_domain/results/plots/wavefield_near_first_physical_boundary_interaction_0.156s.png
+- /Users/tansheng/research/quantum coding/frequency domain linear system generator/frequency_domain_converter/tests/forward_py_vs_frequency_domain/results/plots/wavefield_late_time_0.343s.png
+- /Users/tansheng/research/quantum coding/frequency domain linear system generator/frequency_domain_converter/tests/forward_py_vs_frequency_domain/results/plots/error_vs_time.png
+- /Users/tansheng/research/quantum coding/frequency domain linear system generator/frequency_domain_converter/tests/forward_py_vs_frequency_domain/results/plots/frequency_amplitude_phase_comparison.png

@@ -1,0 +1,12 @@
+{
+  "maximum_relative_residual": 2.041615415652442e-14,
+  "observation_shift_samples": 1,
+  "pml_padding_cells": {
+    "bottom": 30,
+    "left": 30,
+    "right": 30,
+    "top": 30
+  },
+  "retained_bin_count": 35,
+  "threshold": 0.0001
+}
