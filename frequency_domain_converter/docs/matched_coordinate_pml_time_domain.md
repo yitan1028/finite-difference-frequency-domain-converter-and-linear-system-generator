@@ -3,9 +3,9 @@
 ## Scope
 
 The matched time-domain solver uses the same padded velocity, directional
-profiles, C-order mapping, zero-exterior faces, source, receivers, and
-second-order conservative gradients as `coordinate_stretched_pml`. It does
-not use the older scalar-sponge recurrence.
+profiles, C-order mapping, zero-exterior edges, source, receivers, and selected
+second- or fourth-order conservative gradients as `coordinate_stretched_pml`.
+It does not use the older scalar-sponge recurrence.
 
 ## ADE state and frequency-domain equivalence
 
@@ -42,8 +42,11 @@ G_x.T diag(s_z/s_x) G_x U
 - omega^2 diag(s_x s_z/v^2) U = Q.
 ```
 
-The semi-discrete ODE is integrated with classical RK4. Spatial gradients and
-zero-exterior outer faces are identical to the existing conservative
-second-order FD operator. The source enters as `q(t) e_p`; the saved receiver
-traces are analyzed with the raw `exp(+i omega t)` discrete sum used for the
-FD source spectrum.
+The semi-discrete ODE is integrated with classical RK4. For spatial order 2,
+the gradients and zero-exterior outer faces are identical to the nearest-face
+FD operator. For spatial order 4, the ADE construction is applied separately
+to one-cell and two-cell edges and their flux divergences are combined with
+weights `4/3` and `-1/3`. Harmonic elimination therefore recovers the exact
+selected frequency-domain matrix in either mode. The source enters as
+`q(t) e_p`; the saved receiver traces are analyzed with the raw
+`exp(+i omega t)` discrete sum used for the FD source spectrum.

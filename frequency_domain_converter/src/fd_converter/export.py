@@ -553,14 +553,22 @@ def build_operator_metadata(result: Any) -> dict[str, Any]:
         dz_m=result.config.grid.dz_m,
     )
     if result.config.frequency_operator.mode == "coordinate_stretched_pml":
+        system_metadata = result.systems[0].operator_metadata or {}
         metadata = {
-            "spatial_order": 2,
-            "stencil": "conservative variable-coefficient face flux",
-            "operator_definition": (
-                "Gx.T diag(s_z/s_x) Gx + Gz.T diag(s_x/s_z) Gz"
+            "spatial_order": int(result.config.grid.spatial_order),
+            "stencil": (
+                "conservative variable-coefficient nearest-face flux"
+                if result.config.grid.spatial_order == 2
+                else "conservative two-scale fourth-order edge flux"
             ),
+            "operator_definition": system_metadata.get("operator_definition"),
             "node_to_face_averaging": "arithmetic",
-            "outer_boundary_handling": "zero exterior ghost faces",
+            "neighbor_offsets_cells": system_metadata.get(
+                "neighbor_offsets_cells"
+            ),
+            "outer_boundary_handling": system_metadata.get(
+                "outer_boundary_handling"
+            ),
             "periodic_wraparound": False,
             "damping_applied_to_operator": True,
             "dx_m": float(result.config.grid.dx_m),
@@ -593,10 +601,16 @@ def build_coordinate_pml_metadata(result: Any) -> dict[str, Any]:
             "-d/dx[(s_z/s_x)dU/dx] - d/dz[(s_x/s_z)dU/dz] "
             "- omega^2(s_x*s_z/v^2)U = Q"
         ),
-        "spatial_discretization": "conservative_flux_second_order",
-        "true_spatial_order": 2,
+        "spatial_discretization": (
+            result.config.frequency_operator.spatial_discretization
+        ),
+        "true_spatial_order": int(result.config.grid.spatial_order),
         "node_to_face_averaging": "arithmetic",
-        "outer_boundary_handling": "zero exterior ghost faces",
+        "outer_boundary_handling": (
+            (result.systems[0].operator_metadata or {}).get(
+                "outer_boundary_handling"
+            )
+        ),
         "periodic_wraparound": False,
         "directional_profile_files": {
             "sigma_x": "sigma_x.npy",

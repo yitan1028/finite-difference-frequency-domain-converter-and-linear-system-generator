@@ -591,10 +591,12 @@ A = G_x.T diag(s_z / s_x) G_x
 
 `sigma_x` is active only in the left/right padding and `sigma_z` only in the
 top/bottom padding. Both are active in corners and are exactly zero in the
-physical model. Node coefficients are averaged arithmetically to faces in
-both directions. The current variable-coefficient operator is explicitly a
-second-order conservative flux discretization; it is not the fourth-order
-constant-coefficient sponge stencil.
+physical model. Node coefficients are averaged arithmetically to faces in both
+directions. The checked production config remains the validated second-order
+conservative flux discretization. An opt-in fourth-order coordinate-PML path
+uses `(4/3) G_1.T W_1 G_1 - (1/3) G_2.T W_2 G_2`; in the physical region it
+exactly recovers the axis-aligned fourth-order stencil used by `forward.py`,
+while the one- and two-cell PML edges retain directional complex stretching.
 
 Run and solve the selected production configuration with:
 
