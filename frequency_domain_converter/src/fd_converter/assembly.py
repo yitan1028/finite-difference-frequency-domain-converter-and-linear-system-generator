@@ -211,6 +211,7 @@ def assemble_coordinate_stretched_pml_systems(
     time_steps: int,
     dx_m: float,
     dz_m: float,
+    spatial_order: int = 2,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[FrequencySystem]]:
     """Assemble coordinate-stretched systems with a baseline-comparable source."""
     source_time_signal = forward_ricker_time_signal(
@@ -230,6 +231,13 @@ def assemble_coordinate_stretched_pml_systems(
     gradients = build_conservative_gradient_operators(
         velocity.shape[0], velocity.shape[1], dx_m, dz_m
     )
+    wide_gradients = (
+        build_conservative_gradient_operators(
+            velocity.shape[0], velocity.shape[1], dx_m, dz_m, stride=2
+        )
+        if spatial_order == 4
+        else None
+    )
     omega_values: list[float] = []
     systems: list[FrequencySystem] = []
     for frequency_hz, source_amplitude in zip(frequencies_hz, source_spectrum):
@@ -241,6 +249,8 @@ def assemble_coordinate_stretched_pml_systems(
             dx_m,
             dz_m,
             gradients=gradients,
+            wide_gradients=wide_gradients,
+            spatial_order=spatial_order,
         )
         B = build_source_matrix(n, source_flat_index, complex(source_amplitude))
         Q = B.copy()
@@ -390,6 +400,7 @@ def run_conversion(
             time_steps=config.source.time_steps,
             dx_m=config.grid.dx_m,
             dz_m=config.grid.dz_m,
+            spatial_order=config.grid.spatial_order,
         )
         source_transform_metadata = {
             "mode": "forward_time_ricker_raw_dft",
@@ -400,6 +411,10 @@ def run_conversion(
             "time_steps": config.source.time_steps,
             "solver_rhs": "Q_j = S_j * e_p",
             "pml_source_rescaling": "none; s_x = s_z = 1 at source",
+            "spatial_order": config.grid.spatial_order,
+            "spatial_discretization": (
+                config.frequency_operator.spatial_discretization
+            ),
         }
     else:  # Configuration validation should make this unreachable.
         raise ValueError(

@@ -183,10 +183,23 @@ def build_conservative_gradient_operators(
     nx: int,
     dx_m: float,
     dz_m: float,
+    *,
+    stride: int = 1,
 ) -> tuple[sp.csr_matrix, sp.csr_matrix]:
-    """Build node-to-face gradients with explicit zero-exterior outer faces."""
-    if nz < 2 or nx < 2:
-        raise ValueError("Conservative gradients require nz >= 2 and nx >= 2.")
+    """Build strided node-to-edge differences with zero-exterior ghost edges.
+
+    ``stride=1`` is the original nearest-neighbor face-gradient operator.  The
+    two-cell operator uses differences divided by ``2 h`` and two explicit
+    ghost edges on each side.  Combining the two operators as
+    ``4/3 G1.T G1 - 1/3 G2.T G2`` gives the exact fourth-order stencil used by
+    ``forward.py`` wherever the coordinate stretching is one.
+    """
+    if isinstance(stride, bool) or not isinstance(stride, int) or stride < 1:
+        raise ValueError("stride must be a positive integer.")
+    if nz <= stride or nx <= stride:
+        raise ValueError(
+            "Conservative gradients require nz and nx to be greater than stride."
+        )
     if dx_m <= 0.0 or dz_m <= 0.0:
         raise ValueError("dx_m and dz_m must be > 0.")
     n = nz * nx
@@ -194,53 +207,55 @@ def build_conservative_gradient_operators(
     x_rows: list[int] = []
     x_cols: list[int] = []
     x_data: list[float] = []
-    inv_dx = 1.0 / float(dx_m)
+    inv_dx = 1.0 / (float(stride) * float(dx_m))
     for iz in range(nz):
         node_base = iz * nx
-        face_base = iz * (nx + 1)
-        x_rows.append(face_base)
-        x_cols.append(node_base)
-        x_data.append(inv_dx)
-        for ix in range(1, nx):
-            row = face_base + ix
+        face_base = iz * (nx + stride)
+        for ix in range(stride):
+            x_rows.append(face_base + ix)
+            x_cols.append(node_base + ix)
+            x_data.append(inv_dx)
+        for ix in range(nx - stride):
+            row = face_base + stride + ix
             x_rows.extend((row, row))
-            x_cols.extend((node_base + ix - 1, node_base + ix))
+            x_cols.extend((node_base + ix, node_base + ix + stride))
             x_data.extend((-inv_dx, inv_dx))
-        x_rows.append(face_base + nx)
-        x_cols.append(node_base + nx - 1)
-        x_data.append(-inv_dx)
+        for ix in range(nx - stride, nx):
+            x_rows.append(face_base + stride + ix)
+            x_cols.append(node_base + ix)
+            x_data.append(-inv_dx)
     gx = sp.coo_matrix(
         (x_data, (x_rows, x_cols)),
-        shape=(nz * (nx + 1), n),
+        shape=(nz * (nx + stride), n),
         dtype=np.float64,
     ).tocsr()
 
     z_rows: list[int] = []
     z_cols: list[int] = []
     z_data: list[float] = []
-    inv_dz = 1.0 / float(dz_m)
-    for ix in range(nx):
-        z_rows.append(ix)
-        z_cols.append(ix)
-        z_data.append(inv_dz)
-    for iz in range(1, nz):
-        face_base = iz * nx
-        upper_base = (iz - 1) * nx
-        lower_base = iz * nx
+    inv_dz = 1.0 / (float(stride) * float(dz_m))
+    for iz in range(stride):
+        for ix in range(nx):
+            z_rows.append(iz * nx + ix)
+            z_cols.append(iz * nx + ix)
+            z_data.append(inv_dz)
+    for iz in range(nz - stride):
+        face_base = (stride + iz) * nx
+        upper_base = iz * nx
+        lower_base = (iz + stride) * nx
         for ix in range(nx):
             row = face_base + ix
             z_rows.extend((row, row))
             z_cols.extend((upper_base + ix, lower_base + ix))
             z_data.extend((-inv_dz, inv_dz))
-    bottom_face_base = nz * nx
-    bottom_node_base = (nz - 1) * nx
-    for ix in range(nx):
-        z_rows.append(bottom_face_base + ix)
-        z_cols.append(bottom_node_base + ix)
-        z_data.append(-inv_dz)
+    for iz in range(nz - stride, nz):
+        for ix in range(nx):
+            z_rows.append((stride + iz) * nx + ix)
+            z_cols.append(iz * nx + ix)
+            z_data.append(-inv_dz)
     gz = sp.coo_matrix(
         (z_data, (z_rows, z_cols)),
-        shape=((nz + 1) * nx, n),
+        shape=((nz + stride) * nx, n),
         dtype=np.float64,
     ).tocsr()
     return gx, gz
@@ -255,8 +270,10 @@ def assemble_coordinate_stretched_pml_matrix(
     dz_m: float,
     *,
     gradients: tuple[sp.csr_matrix, sp.csr_matrix] | None = None,
+    wide_gradients: tuple[sp.csr_matrix, sp.csr_matrix] | None = None,
+    spatial_order: int = 2,
 ) -> tuple[sp.csr_matrix, float, dict[str, object]]:
-    """Assemble the conservative coordinate-stretched Helmholtz operator."""
+    """Assemble a selectable second/fourth-order coordinate-stretched operator."""
     if frequency_hz <= 0.0:
         raise ValueError("frequency_hz must be > 0.")
     velocity_array = np.asarray(velocity, dtype=np.float64)
@@ -270,6 +287,8 @@ def assemble_coordinate_stretched_pml_matrix(
         raise ValueError("sigma_z shape must match velocity.")
     if np.any(sigma_x_array < 0.0) or np.any(sigma_z_array < 0.0):
         raise ValueError("PML sigma profiles must be nonnegative.")
+    if spatial_order not in {2, 4}:
+        raise ValueError("spatial_order must be 2 or 4.")
 
     nz, nx = velocity_array.shape
     gx, gz = gradients or build_conservative_gradient_operators(
@@ -279,14 +298,22 @@ def assemble_coordinate_stretched_pml_matrix(
         raise ValueError(f"Unexpected Gx shape {gx.shape}.")
     if gz.shape != ((nz + 1) * nx, nz * nx):
         raise ValueError(f"Unexpected Gz shape {gz.shape}.")
+    if spatial_order == 4:
+        gx_wide, gz_wide = wide_gradients or build_conservative_gradient_operators(
+            nz, nx, dx_m, dz_m, stride=2
+        )
+        if gx_wide.shape != (nz * (nx + 2), nz * nx):
+            raise ValueError(f"Unexpected two-cell Gx shape {gx_wide.shape}.")
+        if gz_wide.shape != ((nz + 2) * nx, nz * nx):
+            raise ValueError(f"Unexpected two-cell Gz shape {gz_wide.shape}.")
 
     omega = 2.0 * np.pi * float(frequency_hz)
     sx = 1.0 + 1j * sigma_x_array / omega
     sz = 1.0 + 1j * sigma_z_array / omega
     coefficient_x = sz / sx
     coefficient_z = sx / sz
-    coefficient_x_faces = _node_to_x_faces(coefficient_x)
-    coefficient_z_faces = _node_to_z_faces(coefficient_z)
+    coefficient_x_faces = _node_to_x_faces(coefficient_x, stride=1)
+    coefficient_z_faces = _node_to_z_faces(coefficient_z, stride=1)
 
     kx = gx.T @ sp.diags(
         coefficient_x_faces.ravel(order="C"), format="csr"
@@ -294,6 +321,17 @@ def assemble_coordinate_stretched_pml_matrix(
     kz = gz.T @ sp.diags(
         coefficient_z_faces.ravel(order="C"), format="csr"
     ) @ gz
+    if spatial_order == 4:
+        coefficient_x_wide = _node_to_x_faces(coefficient_x, stride=2)
+        coefficient_z_wide = _node_to_z_faces(coefficient_z, stride=2)
+        kx_wide = gx_wide.T @ sp.diags(
+            coefficient_x_wide.ravel(order="C"), format="csr"
+        ) @ gx_wide
+        kz_wide = gz_wide.T @ sp.diags(
+            coefficient_z_wide.ravel(order="C"), format="csr"
+        ) @ gz_wide
+        kx = (4.0 / 3.0) * kx - (1.0 / 3.0) * kx_wide
+        kz = (4.0 / 3.0) * kz - (1.0 / 3.0) * kz_wide
     mass_diagonal = (sx * sz / velocity_array**2).ravel(order="C")
     matrix = (
         kx.astype(np.complex128)
@@ -314,11 +352,31 @@ def assemble_coordinate_stretched_pml_matrix(
             "Gx.T diag(s_z/s_x at x faces) Gx + "
             "Gz.T diag(s_x/s_z at z faces) Gz - "
             "omega^2 diag(s_x*s_z/v^2)"
+            if spatial_order == 2
+            else "(4/3) Gx1.T W_x1 Gx1 - (1/3) Gx2.T W_x2 Gx2 + "
+            "(4/3) Gz1.T W_z1 Gz1 - (1/3) Gz2.T W_z2 Gz2 - "
+            "omega^2 diag(s_x*s_z/v^2)"
         ),
-        "spatial_discretization": "conservative_flux_second_order",
-        "spatial_order": 2,
+        "spatial_discretization": (
+            "conservative_flux_second_order"
+            if spatial_order == 2
+            else "conservative_two_scale_fourth_order"
+        ),
+        "spatial_order": spatial_order,
+        "neighbor_offsets_cells": [1] if spatial_order == 2 else [1, 2],
+        "two_scale_weights": (
+            None if spatial_order == 2 else {"one_cell": 4.0 / 3.0, "two_cell": -1.0 / 3.0}
+        ),
         "node_to_face_averaging": "arithmetic",
-        "outer_boundary_handling": "zero exterior ghost faces",
+        "outer_boundary_handling": (
+            "zero exterior ghost faces"
+            if spatial_order == 2
+            else "zero exterior ghost edges for both one-cell and two-cell differences"
+        ),
+        "physical_pml_interface_handling": (
+            "directional stretch coefficients are averaged across every stencil edge, "
+            "including two-cell edges that straddle the physical/PML interface"
+        ),
         "periodic_wraparound": False,
         "sigma_x_max_per_s": float(np.max(sigma_x_array)),
         "sigma_z_max_per_s": float(np.max(sigma_z_array)),
@@ -337,21 +395,29 @@ def assemble_coordinate_stretched_pml_matrix(
     return matrix, float(omega), metadata
 
 
-def _node_to_x_faces(values: np.ndarray) -> np.ndarray:
+def _node_to_x_faces(values: np.ndarray, *, stride: int = 1) -> np.ndarray:
     nz, nx = values.shape
-    faces = np.empty((nz, nx + 1), dtype=np.complex128)
-    faces[:, 0] = values[:, 0]
-    faces[:, -1] = values[:, -1]
-    faces[:, 1:-1] = 0.5 * (values[:, :-1] + values[:, 1:])
+    if stride < 1 or nx <= stride:
+        raise ValueError("x-face stride must be positive and less than nx.")
+    faces = np.empty((nz, nx + stride), dtype=np.complex128)
+    faces[:, :stride] = values[:, :stride]
+    faces[:, stride:nx] = 0.5 * (
+        values[:, : nx - stride] + values[:, stride:]
+    )
+    faces[:, nx:] = values[:, -stride:]
     return faces
 
 
-def _node_to_z_faces(values: np.ndarray) -> np.ndarray:
+def _node_to_z_faces(values: np.ndarray, *, stride: int = 1) -> np.ndarray:
     nz, nx = values.shape
-    faces = np.empty((nz + 1, nx), dtype=np.complex128)
-    faces[0, :] = values[0, :]
-    faces[-1, :] = values[-1, :]
-    faces[1:-1, :] = 0.5 * (values[:-1, :] + values[1:, :])
+    if stride < 1 or nz <= stride:
+        raise ValueError("z-face stride must be positive and less than nz.")
+    faces = np.empty((nz + stride, nx), dtype=np.complex128)
+    faces[:stride, :] = values[:stride, :]
+    faces[stride:nz, :] = 0.5 * (
+        values[: nz - stride, :] + values[stride:, :]
+    )
+    faces[nz:, :] = values[-stride:, :]
     return faces
 
 

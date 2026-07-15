@@ -58,6 +58,10 @@ class _State:
     aux_x_right: np.ndarray
     aux_z_top: np.ndarray
     aux_z_bottom: np.ndarray
+    aux_x_wide_left: np.ndarray
+    aux_x_wide_right: np.ndarray
+    aux_z_wide_top: np.ndarray
+    aux_z_wide_bottom: np.ndarray
 
 
 class _MatchedPMLSystem:
@@ -72,6 +76,7 @@ class _MatchedPMLSystem:
         dx_m: float,
         dz_m: float,
         source_flat_index: int,
+        spatial_order: int = 2,
     ) -> None:
         self.velocity_squared = np.asarray(velocity, dtype=np.float64) ** 2
         self.sigma_x = np.asarray(sigma_x, dtype=np.float64)
@@ -93,6 +98,9 @@ class _MatchedPMLSystem:
         if not 0 <= self.source_flat_index < self.nz * self.nx:
             raise ValueError("source_flat_index lies outside the padded grid.")
         self.source_iz, self.source_ix = divmod(self.source_flat_index, self.nx)
+        if spatial_order not in {2, 4}:
+            raise ValueError("spatial_order must be 2 or 4.")
+        self.spatial_order = spatial_order
 
         self.sigma_sum = self.sigma_x + self.sigma_z
         self.sigma_product = self.sigma_x * self.sigma_z
@@ -101,18 +109,37 @@ class _MatchedPMLSystem:
             self.sigma_x_face_right,
             self.sigma_z_on_x_left,
             self.sigma_z_on_x_right,
-        ) = _x_face_endpoint_values(self.sigma_x, self.sigma_z)
+        ) = _x_face_endpoint_values(self.sigma_x, self.sigma_z, stride=1)
         (
             self.sigma_z_face_top,
             self.sigma_z_face_bottom,
             self.sigma_x_on_z_top,
             self.sigma_x_on_z_bottom,
-        ) = _z_face_endpoint_values(self.sigma_x, self.sigma_z)
+        ) = _z_face_endpoint_values(self.sigma_x, self.sigma_z, stride=1)
+        if self.spatial_order == 4:
+            (
+                self.sigma_x_wide_left,
+                self.sigma_x_wide_right,
+                self.sigma_z_on_x_wide_left,
+                self.sigma_z_on_x_wide_right,
+            ) = _x_face_endpoint_values(self.sigma_x, self.sigma_z, stride=2)
+            (
+                self.sigma_z_wide_top,
+                self.sigma_z_wide_bottom,
+                self.sigma_x_on_z_wide_top,
+                self.sigma_x_on_z_wide_bottom,
+            ) = _z_face_endpoint_values(self.sigma_x, self.sigma_z, stride=2)
 
     def zeros(self) -> _State:
         node_shape = (self.nz, self.nx)
         x_face_shape = (self.nz, self.nx + 1)
         z_face_shape = (self.nz + 1, self.nx)
+        x_wide_shape = (
+            (self.nz, self.nx + 2) if self.spatial_order == 4 else (0,)
+        )
+        z_wide_shape = (
+            (self.nz + 2, self.nx) if self.spatial_order == 4 else (0,)
+        )
         return _State(
             pressure=np.zeros(node_shape, dtype=np.float64),
             pressure_rate=np.zeros(node_shape, dtype=np.float64),
@@ -120,6 +147,10 @@ class _MatchedPMLSystem:
             aux_x_right=np.zeros(x_face_shape, dtype=np.float64),
             aux_z_top=np.zeros(z_face_shape, dtype=np.float64),
             aux_z_bottom=np.zeros(z_face_shape, dtype=np.float64),
+            aux_x_wide_left=np.zeros(x_wide_shape, dtype=np.float64),
+            aux_x_wide_right=np.zeros(x_wide_shape, dtype=np.float64),
+            aux_z_wide_top=np.zeros(z_wide_shape, dtype=np.float64),
+            aux_z_wide_bottom=np.zeros(z_wide_shape, dtype=np.float64),
         )
 
     def derivative(self, state: _State, source_value: float) -> _State:
@@ -138,10 +169,52 @@ class _MatchedPMLSystem:
             + (self.sigma_x_on_z_bottom - self.sigma_z_face_bottom)
             * state.aux_z_bottom
         )
-        spatial = (
-            (flux_x[:, :-1] - flux_x[:, 1:]) / self.dx_m
-            + (flux_z[:-1, :] - flux_z[1:, :]) / self.dz_m
+        spatial_near = (
+            _edge_divergence_x(flux_x, self.dx_m, stride=1)
+            + _edge_divergence_z(flux_z, self.dz_m, stride=1)
         )
+        if self.spatial_order == 4:
+            gradient_x_wide = _gradient_x(state.pressure, self.dx_m, stride=2)
+            gradient_z_wide = _gradient_z(state.pressure, self.dz_m, stride=2)
+            flux_x_wide = gradient_x_wide + 0.5 * (
+                (self.sigma_z_on_x_wide_left - self.sigma_x_wide_left)
+                * state.aux_x_wide_left
+                + (self.sigma_z_on_x_wide_right - self.sigma_x_wide_right)
+                * state.aux_x_wide_right
+            )
+            flux_z_wide = gradient_z_wide + 0.5 * (
+                (self.sigma_x_on_z_wide_top - self.sigma_z_wide_top)
+                * state.aux_z_wide_top
+                + (self.sigma_x_on_z_wide_bottom - self.sigma_z_wide_bottom)
+                * state.aux_z_wide_bottom
+            )
+            spatial_wide = (
+                _edge_divergence_x(flux_x_wide, self.dx_m, stride=2)
+                + _edge_divergence_z(flux_z_wide, self.dz_m, stride=2)
+            )
+            spatial = (4.0 / 3.0) * spatial_near - (1.0 / 3.0) * spatial_wide
+            aux_x_wide_left = (
+                gradient_x_wide
+                - self.sigma_x_wide_left * state.aux_x_wide_left
+            )
+            aux_x_wide_right = (
+                gradient_x_wide
+                - self.sigma_x_wide_right * state.aux_x_wide_right
+            )
+            aux_z_wide_top = (
+                gradient_z_wide
+                - self.sigma_z_wide_top * state.aux_z_wide_top
+            )
+            aux_z_wide_bottom = (
+                gradient_z_wide
+                - self.sigma_z_wide_bottom * state.aux_z_wide_bottom
+            )
+        else:
+            spatial = spatial_near
+            aux_x_wide_left = np.empty(0, dtype=np.float64)
+            aux_x_wide_right = np.empty(0, dtype=np.float64)
+            aux_z_wide_top = np.empty(0, dtype=np.float64)
+            aux_z_wide_bottom = np.empty(0, dtype=np.float64)
         pressure_acceleration = (
             -self.velocity_squared * spatial
             - self.sigma_sum * state.pressure_rate
@@ -165,6 +238,10 @@ class _MatchedPMLSystem:
             aux_z_bottom=(
                 gradient_z - self.sigma_z_face_bottom * state.aux_z_bottom
             ),
+            aux_x_wide_left=aux_x_wide_left,
+            aux_x_wide_right=aux_x_wide_right,
+            aux_z_wide_top=aux_z_wide_top,
+            aux_z_wide_bottom=aux_z_wide_bottom,
         )
 
 
@@ -280,6 +357,9 @@ def run_matched_time_domain(
 
     source_flat_index = int(resolved["resolved_source_flat_index"])
     receiver_indices = _receiver_indices(resolved, n=nz * nx)
+    spatial_order = int(resolved["spatial_order"])
+    if spatial_order != fd_config.grid.spatial_order:
+        raise ValueError("Referenced FD config and package use different spatial order.")
     system = _MatchedPMLSystem(
         velocity,
         sigma_x,
@@ -287,6 +367,7 @@ def run_matched_time_domain(
         dx_m=float(resolved["dx_m"]),
         dz_m=float(resolved["dz_m"]),
         source_flat_index=source_flat_index,
+        spatial_order=spatial_order,
     )
 
     state = system.zeros()
@@ -378,7 +459,10 @@ def run_matched_time_domain(
     dz_m = float(resolved["dz_m"])
     velocity_max = float(np.max(velocity))
     cfl = velocity_max * selected_dt_s * math.sqrt(dx_m**-2 + dz_m**-2)
-    rk4_wave_stability_fraction = 2.0 * cfl / (2.0 * math.sqrt(2.0))
+    order_stability_factor = math.sqrt(4.0 / 3.0) if spatial_order == 4 else 1.0
+    rk4_wave_stability_fraction = (
+        order_stability_factor * 2.0 * cfl / (2.0 * math.sqrt(2.0))
+    )
     sigma_dt_max = float(max(np.max(sigma_x), np.max(sigma_z)) * selected_dt_s)
     source_end_index = int(np.max(np.flatnonzero(source_signal != 0.0)))
     late_start = max(source_end_index + 1, int(0.8 * nt))
@@ -425,7 +509,12 @@ def run_matched_time_domain(
         "receiver_flat_indices": receiver_indices.tolist(),
         "receiver_trace_shape": list(receiver_traces.shape),
         "integrator": "classical RK4",
-        "spatial_discretization": "matched conservative second-order face flux",
+        "spatial_order": spatial_order,
+        "spatial_discretization": (
+            "matched conservative second-order face flux"
+            if spatial_order == 2
+            else "matched conservative two-scale fourth-order edge flux"
+        ),
         "outer_boundary": "zero exterior ghost faces",
         "harmonic_convention": "exp(-i*omega*t)",
         "analysis_kernel": "exp(+i*omega*t)",
@@ -567,60 +656,106 @@ def _state_arrays(state: _State) -> tuple[np.ndarray, ...]:
         state.aux_x_right,
         state.aux_z_top,
         state.aux_z_bottom,
+        state.aux_x_wide_left,
+        state.aux_x_wide_right,
+        state.aux_z_wide_top,
+        state.aux_z_wide_bottom,
     )
 
 
-def _gradient_x(values: np.ndarray, dx_m: float) -> np.ndarray:
-    gradient = np.empty((values.shape[0], values.shape[1] + 1), dtype=np.float64)
-    gradient[:, 0] = values[:, 0] / dx_m
-    gradient[:, 1:-1] = (values[:, 1:] - values[:, :-1]) / dx_m
-    gradient[:, -1] = -values[:, -1] / dx_m
+def _gradient_x(
+    values: np.ndarray, dx_m: float, *, stride: int = 1
+) -> np.ndarray:
+    gradient = np.empty(
+        (values.shape[0], values.shape[1] + stride), dtype=np.float64
+    )
+    scale = float(stride) * dx_m
+    gradient[:, :stride] = values[:, :stride] / scale
+    gradient[:, stride : values.shape[1]] = (
+        values[:, stride:] - values[:, : -stride]
+    ) / scale
+    gradient[:, values.shape[1] :] = -values[:, -stride:] / scale
     return gradient
 
 
-def _gradient_z(values: np.ndarray, dz_m: float) -> np.ndarray:
-    gradient = np.empty((values.shape[0] + 1, values.shape[1]), dtype=np.float64)
-    gradient[0, :] = values[0, :] / dz_m
-    gradient[1:-1, :] = (values[1:, :] - values[:-1, :]) / dz_m
-    gradient[-1, :] = -values[-1, :] / dz_m
+def _gradient_z(
+    values: np.ndarray, dz_m: float, *, stride: int = 1
+) -> np.ndarray:
+    gradient = np.empty(
+        (values.shape[0] + stride, values.shape[1]), dtype=np.float64
+    )
+    scale = float(stride) * dz_m
+    gradient[:stride, :] = values[:stride, :] / scale
+    gradient[stride : values.shape[0], :] = (
+        values[stride:, :] - values[:-stride, :]
+    ) / scale
+    gradient[values.shape[0] :, :] = -values[-stride:, :] / scale
     return gradient
+
+
+def _edge_divergence_x(
+    flux: np.ndarray, dx_m: float, *, stride: int
+) -> np.ndarray:
+    nx = flux.shape[1] - stride
+    return (flux[:, :nx] - flux[:, stride : stride + nx]) / (
+        float(stride) * dx_m
+    )
+
+
+def _edge_divergence_z(
+    flux: np.ndarray, dz_m: float, *, stride: int
+) -> np.ndarray:
+    nz = flux.shape[0] - stride
+    return (flux[:nz, :] - flux[stride : stride + nz, :]) / (
+        float(stride) * dz_m
+    )
 
 
 def _x_face_endpoint_values(
-    sigma_x: np.ndarray, sigma_z: np.ndarray
+    sigma_x: np.ndarray, sigma_z: np.ndarray, *, stride: int = 1
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     return (
-        _extend_x_faces(sigma_x, "left"),
-        _extend_x_faces(sigma_x, "right"),
-        _extend_x_faces(sigma_z, "left"),
-        _extend_x_faces(sigma_z, "right"),
+        _extend_x_faces(sigma_x, "left", stride=stride),
+        _extend_x_faces(sigma_x, "right", stride=stride),
+        _extend_x_faces(sigma_z, "left", stride=stride),
+        _extend_x_faces(sigma_z, "right", stride=stride),
     )
 
 
 def _z_face_endpoint_values(
-    sigma_x: np.ndarray, sigma_z: np.ndarray
+    sigma_x: np.ndarray, sigma_z: np.ndarray, *, stride: int = 1
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     return (
-        _extend_z_faces(sigma_z, "top"),
-        _extend_z_faces(sigma_z, "bottom"),
-        _extend_z_faces(sigma_x, "top"),
-        _extend_z_faces(sigma_x, "bottom"),
+        _extend_z_faces(sigma_z, "top", stride=stride),
+        _extend_z_faces(sigma_z, "bottom", stride=stride),
+        _extend_z_faces(sigma_x, "top", stride=stride),
+        _extend_z_faces(sigma_x, "bottom", stride=stride),
     )
 
 
-def _extend_x_faces(values: np.ndarray, side: str) -> np.ndarray:
-    extended = np.empty((values.shape[0], values.shape[1] + 1), dtype=np.float64)
-    extended[:, 0] = values[:, 0]
-    extended[:, -1] = values[:, -1]
-    extended[:, 1:-1] = values[:, :-1] if side == "left" else values[:, 1:]
+def _extend_x_faces(
+    values: np.ndarray, side: str, *, stride: int = 1
+) -> np.ndarray:
+    nx = values.shape[1]
+    extended = np.empty((values.shape[0], nx + stride), dtype=np.float64)
+    extended[:, :stride] = values[:, :stride]
+    extended[:, nx:] = values[:, -stride:]
+    extended[:, stride:nx] = (
+        values[:, : nx - stride] if side == "left" else values[:, stride:]
+    )
     return extended
 
 
-def _extend_z_faces(values: np.ndarray, side: str) -> np.ndarray:
-    extended = np.empty((values.shape[0] + 1, values.shape[1]), dtype=np.float64)
-    extended[0, :] = values[0, :]
-    extended[-1, :] = values[-1, :]
-    extended[1:-1, :] = values[:-1, :] if side == "top" else values[1:, :]
+def _extend_z_faces(
+    values: np.ndarray, side: str, *, stride: int = 1
+) -> np.ndarray:
+    nz = values.shape[0]
+    extended = np.empty((nz + stride, values.shape[1]), dtype=np.float64)
+    extended[:stride, :] = values[:stride, :]
+    extended[nz:, :] = values[-stride:, :]
+    extended[stride:nz, :] = (
+        values[: nz - stride, :] if side == "top" else values[stride:, :]
+    )
     return extended
 
 

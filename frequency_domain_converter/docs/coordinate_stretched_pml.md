@@ -47,11 +47,13 @@ rescaled by PML coefficients. The production source uses the same finite
 forward-Ricker sequence and raw positive-sign DFT coefficients as the scalar
 sponge baseline, so boundary comparisons use the same right-hand side.
 
-## Conservative discretization
+## Selectable conservative discretization
 
-The current implementation uses a second-order conservative face-flux
-discretization. This is an explicit accuracy choice; it is not described as the
-project's fourth-order constant-coefficient stencil.
+The coordinate-stretched mode supports the validated second-order face-flux
+path and an opt-in fourth-order path. Existing configurations remain
+second-order unless `grid.spatial_order` is changed to 4. The matching explicit
+configuration names are `conservative_flux_second_order` and
+`conservative_two_scale_fourth_order`.
 
 Node-to-face coefficients use arithmetic averaging in both directions:
 
@@ -66,6 +68,27 @@ A_pml = K_x + K_z - omega^2 M_pml.
 values. No periodic connection or `roll` operation is used. In the zero-profile
 limit, the matrix reduces to the existing second-order zero-exterior Helmholtz
 matrix.
+
+The fourth-order path uses one-cell and two-cell edge differences:
+
+```text
+K_x,4 = (4/3) G_x,1.T W_x,1 G_x,1
+      - (1/3) G_x,2.T W_x,2 G_x,2,
+K_z,4 = (4/3) G_z,1.T W_z,1 G_z,1
+      - (1/3) G_z,2.T W_z,2 G_z,2.
+```
+
+`G_2` divides a two-cell difference by `2 h`. Where both directional sigma
+profiles are zero, this factorization is exactly the axis-aligned stencil used
+by the original `forward.py`: center `-5/2`, first neighbor `4/3`, and second
+neighbor `-1/12` for each second derivative. Directional stretch coefficients
+are averaged across both one-cell and two-cell edges, including edges that
+cross the physical/PML interface. Both edge sets use zero exterior ghosts.
+
+This extension preserves the complete coordinate-PML coupling and mass term;
+it is not an imaginary diagonal or a scalar sponge. The production coordinate
+PML configuration remains second-order so its previously validated outputs do
+not change silently.
 
 ## Output traceability
 

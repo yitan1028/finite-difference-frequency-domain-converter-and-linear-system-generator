@@ -17,7 +17,10 @@ SUPPORTED_FREQUENCY_OPERATOR_MODES = {
 }
 FORWARD_DISCRETE_MODES = {"forward_discrete_damped", "forward_discrete_pml"}
 COORDINATE_PML_MODES = {"coordinate_stretched_pml"}
-SUPPORTED_PML_SPATIAL_DISCRETIZATIONS = {"conservative_flux_second_order"}
+SUPPORTED_PML_SPATIAL_DISCRETIZATIONS = {
+    "conservative_flux_second_order",
+    "conservative_two_scale_fourth_order",
+}
 SUPPORTED_DAMPING_PROFILES = {"quadratic", "polynomial"}
 SUPPORTED_DAMPING_VELOCITY_REFERENCES = {"minimum", "maximum"}
 SUPPORTED_DAMPING_CORNER_COMBINATIONS = {
@@ -179,7 +182,9 @@ def load_config(path: str | Path) -> RunConfig:
         )
     boundary = _parse_boundary(boundary_raw, boundary_type)
 
-    frequency_operator = _parse_frequency_operator(raw.get("frequency_operator"))
+    frequency_operator = _parse_frequency_operator(
+        raw.get("frequency_operator"), spatial_order=grid.spatial_order
+    )
     source = _parse_source(_require_mapping(raw, "source", "config"))
     _validate_frequency_operator_contract(
         grid=grid,
@@ -330,7 +335,9 @@ def _parse_source(raw: Mapping[str, Any]) -> SourceConfig:
     )
 
 
-def _parse_frequency_operator(raw: Any) -> FrequencyOperatorConfig:
+def _parse_frequency_operator(
+    raw: Any, *, spatial_order: int = 2
+) -> FrequencyOperatorConfig:
     if raw is None:
         return FrequencyOperatorConfig()
     if not isinstance(raw, dict):
@@ -363,7 +370,12 @@ def _parse_frequency_operator(raw: Any) -> FrequencyOperatorConfig:
     spatial_discretization = raw.get("spatial_discretization")
     if mode in COORDINATE_PML_MODES:
         spatial_discretization = (
-            spatial_discretization or "conservative_flux_second_order"
+            spatial_discretization
+            or (
+                "conservative_flux_second_order"
+                if spatial_order == 2
+                else "conservative_two_scale_fourth_order"
+            )
         )
         if spatial_discretization not in SUPPORTED_PML_SPATIAL_DISCRETIZATIONS:
             raise ConfigError(
@@ -397,10 +409,15 @@ def _validate_frequency_operator_contract(
                 "coordinate_stretched_pml requires "
                 "boundary.type='forward_compatible_padding'."
             )
-        if grid.spatial_order != 2:
+        expected_discretization = {
+            2: "conservative_flux_second_order",
+            4: "conservative_two_scale_fourth_order",
+        }[grid.spatial_order]
+        if frequency_operator.spatial_discretization != expected_discretization:
             raise ConfigError(
-                "coordinate_stretched_pml currently uses an explicit second-order "
-                "conservative flux discretization; set grid.spatial_order=2."
+                "coordinate_stretched_pml grid.spatial_order and "
+                "frequency_operator.spatial_discretization disagree: "
+                f"order {grid.spatial_order} requires {expected_discretization!r}."
             )
         if source.type != "forward_time_ricker_dft":
             raise ConfigError(
